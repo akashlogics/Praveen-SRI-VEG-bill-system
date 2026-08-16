@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ta">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>காய்கறி பில்லிங்</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Baloo+Thambi+2:wght@600;700;800&family=Noto+Sans+Tamil:wght@400;500;600;700&family=Poppins:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <!-- Login Screen -->
+  <div id="loginScreen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-logo">🥬</div>
+      <h1 class="login-title">காய்கறி பில்லிங்</h1>
+      <div id="loginShopName" class="login-shop">Vegetable Billing System</div>
+      <div class="login-field">
+        <label>கடவுச்சொல் (Password)</label>
+        <input type="password" id="loginPassword" placeholder="கடவுச்சொல் உள்ளிடவும்" autocomplete="current-password">
+      </div>
+      <div id="loginError" class="login-error hidden"></div>
+      <button class="login-btn" id="loginBtn">உள்நுழை →</button>
+    </div>
+  </div>
+
+  <!-- Thermal bulk-print (hidden, only visible on print) -->
+  <div id="thermalPrintArea"></div>
+
+  <!-- Hidden receipt for image capture -->
+  <div id="imageCaptureDummy"></div>
+
+  <div class="app">
+
+    <!-- Desktop sidebar / Mobile top bar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-emoji">🥬</div>
+        <div class="brand-text">
+          <div class="brand-name" id="brandShopName">காய்கறி பில்லிங்</div>
+          <div class="brand-sub" id="serverStatus">✓ இணைக்கப்பட்டது</div>
+        </div>
+      </div>
+      <nav class="nav desktop-nav">
+        <button class="nav-btn active" data-tab="dashboard"><span
+            class="nav-icon">🏠</span><span>முகப்பு</span></button>
+        <button class="nav-btn" data-tab="newbill"><span class="nav-icon">🧾</span><span>புதிய பில்</span></button>
+        <button class="nav-btn" data-tab="payments"><span class="nav-icon">💰</span><span>பணம் பெறுதல்</span></button>
+        <button class="nav-btn" data-tab="items"><span class="nav-icon">🥦</span><span>பொருட்கள்</span></button>
+        <button class="nav-btn" data-tab="customers"><span class="nav-icon">👥</span><span>வாடிக்கையாளர்</span></button>
+        <button class="nav-btn" data-tab="reports"><span class="nav-icon">📊</span><span>அறிக்கை</span></button>
+        <button class="nav-btn" data-tab="settings"><span class="nav-icon">⚙️</span><span>அமைப்புகள்</span></button>
+      </nav>
+    </aside>
+
+    <!-- Mobile Bottom Navigation -->
+    <nav class="mobile-nav">
+      <button class="mob-btn active" data-tab="dashboard"><span>🏠</span><span>முகப்பு</span></button>
+      <button class="mob-btn" data-tab="newbill"><span>🧾</span><span>புதிய பில்</span></button>
+      <button class="mob-btn" data-tab="payments"><span>💰</span><span>பணம்</span></button>
+      <button class="mob-btn" data-tab="customers"><span>👥</span><span>வாடிக்கையாளர்</span></button>
+      <button class="mob-btn" data-tab="reports"><span>📊</span><span>அறிக்கை</span></button>
+      <button class="mob-btn" data-tab="more"><span>⋯</span><span>மேலும்</span></button>
+    </nav>
+
+    <!-- More drawer (mobile) -->
+    <div class="more-drawer hidden" id="moreDrawer">
+      <button class="more-item" data-tab="items">🥦 பொருட்கள்</button>
+      <button class="more-item" data-tab="settings">⚙️ அமைப்புகள்</button>
+    </div>
+    <div class="drawer-backdrop hidden" id="drawerBackdrop"></div>
+
+    <main class="main">
+
+      <!-- DASHBOARD -->
+      <section class="tab active" id="tab-dashboard">
+        <header class="page-head">
+          <h1>முகப்பு</h1>
+          <p class="page-sub" id="todayDateDisplay"></p>
+        </header>
+        <div class="stat-grid">
+          <div class="stat-card torn">
+            <div class="stat-label">இன்றைய விற்பனை</div>
+            <div class="stat-value" id="statTodaySales">₹0</div>
+            <div class="stat-foot" id="statTodayBills">0 பில்கள்</div>
+          </div>
+          <div class="stat-card torn">
+            <div class="stat-label">இந்த மாத விற்பனை</div>
+            <div class="stat-value" id="statMonthSales">₹0</div>
+            <div class="stat-foot" id="statMonthBills">0 பில்கள்</div>
+          </div>
+          <div class="stat-card torn accent">
+            <div class="stat-label">மொத்த நிலுவை</div>
+            <div class="stat-value" id="statPending">₹0</div>
+            <div class="stat-foot" id="statCustomerCount">0 வாடிக்கையாளர்</div>
+          </div>
+          <div class="stat-card torn">
+            <div class="stat-label">பொருட்கள்</div>
+            <div class="stat-value" id="statItemCount">0</div>
+            <div class="stat-foot">வகைகள்</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>சமீபத்திய பில்கள்</h2><button class="btn btn-primary" id="dashNewBillBtn">+ புதிய பில்</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="recentBillsTable">
+              <thead>
+                <tr>
+                  <th>பில்</th>
+                  <th>தேதி</th>
+                  <th>வாடிக்கையாளர்</th>
+                  <th>மொத்தம்</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-state" id="recentBillsEmpty" style="display:none;">இன்னும் பில் இல்லை.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- NEW BILL -->
+      <section class="tab" id="tab-newbill">
+        <header class="page-head">
+          <h1>புதிய பில்</h1>
+        </header>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>வாடிக்கையாளர்</h2>
+          </div>
+          <div class="form-row">
+            <div class="form-field grow"><label>வாடிக்கையாளர் தேர்வு</label>
+              <select id="billCustomerSelect">
+                <option value="">-- தேர்வு செய்யவும் --</option>
+              </select>
+            </div>
+            <div class="form-field"><label>&nbsp;</label><button class="btn btn-secondary" id="newCustomerQuickBtn">+
+                புதியவர்</button></div>
+          </div>
+          <div class="prev-balance-line">முந்தைய பாக்கி: <strong id="prevBalStrong">₹0.00</strong></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>பொருட்கள்</h2><button class="btn btn-secondary" id="addItemRowBtn">+ சேர்</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table editable">
+              <thead>
+                <tr>
+                  <th>பொருள்</th>
+                  <th>அளவு</th>
+                  <th>விலை</th>
+                  <th>மதிப்பு</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="billItemsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel totals-panel">
+          <div class="totals-row"><span>இன்றைய தொகை</span><strong id="billTodayTotal">₹0.00</strong></div>
+          <div class="totals-row"><span>முன் பாக்கி</span><strong id="billPrevBalanceVal">₹0.00</strong></div>
+          <div class="totals-row vr-row">
+            <span>கூலி</span>
+            <input type="number" id="kuliInput" min="0" step="1" placeholder="0">
+          </div>
+          <div class="totals-row grand"><span>மொத்தம்</span><strong id="billGrandTotal">₹0.00</strong></div>
+          <div class="bill-actions">
+            <button class="btn btn-ghost" id="clearBillBtn">அழி</button>
+            <button class="btn btn-primary btn-lg" id="saveBillBtn">🖨 சேமி &amp; காண்பி</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- PAYMENTS -->
+      <section class="tab" id="tab-payments">
+        <header class="page-head">
+          <h1>பணம் பெறுதல்</h1>
+        </header>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>புதிய பணம் பதிவு</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-field"><label>வாடிக்கையாளர்</label>
+              <select id="paymentCustomerSelect">
+                <option value="">-- தேர்வு --</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <div class="form-field grow"><label>தேதி</label><input type="date" id="paymentDate"></div>
+              <div class="form-field grow"><label>தொகை (₹)</label><input type="number" id="paymentAmount" min="0"
+                  step="1" placeholder="0"></div>
+            </div>
+            <div class="form-field"><label>முறை</label>
+              <select id="paymentMode">
+                <option>பணம் (Cash)</option>
+                <option>வங்கி பரிமாற்றம் (Bank Transfer)</option>
+                <option>UPI / GPay / PhonePe</option>
+                <option>காசோலை (Cheque)</option>
+                <option>மற்றவை</option>
+              </select>
+            </div>
+            <div class="form-field"><label>Reference எண் (விருப்பத்துடையது)</label>
+              <input type="text" id="paymentReference" placeholder="UTR எண், காசோலை எண்">
+            </div>
+            <div class="balance-preview">தற்போதைய பாக்கி: <strong id="payBalStrong">₹0.00</strong></div>
+            <button class="btn btn-primary full-btn" id="savePaymentBtn">✓ பணம் சேமி</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>சமீபத்திய பதிவுகள்</h2>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="paymentsTable">
+              <thead>
+                <tr>
+                  <th>தேதி</th>
+                  <th>வாடிக்கையாளர்</th>
+                  <th>தொகை</th>
+                  <th>முறை</th>
+                  <th>பாக்கி</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-state" id="paymentsEmpty" style="display:none;">பதிவுகள் இல்லை.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ITEMS -->
+      <section class="tab" id="tab-items">
+        <header class="page-head">
+          <h1>பொருட்கள்</h1>
+        </header>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>புதிய பொருள்</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-field"><label>பெயர்</label><input type="text" id="newItemName" placeholder="எ.கா. தக்காளி">
+            </div>
+            <div class="form-row">
+              <div class="form-field grow"><label>அலகு</label>
+                <select id="newItemUnit">
+                  <option>கிலோ</option>
+                  <option>எண்ணிக்கை</option>
+                  <option>கட்டு</option>
+                  <option>மூட்டை</option>
+                </select>
+              </div>
+              <div class="form-field grow"><label>விலை (₹)</label><input type="number" id="newItemPrice" min="0"
+                  step="0.5" placeholder="0.00"></div>
+            </div>
+            <button class="btn btn-primary full-btn" id="addItemBtn">+ சேர்க்க</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>பட்டியல்</h2><span class="muted" id="itemsCountLabel"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="itemsTable">
+              <thead>
+                <tr>
+                  <th>பொருள்</th>
+                  <th>அலகு</th>
+                  <th>விலை (₹)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- CUSTOMERS -->
+      <section class="tab" id="tab-customers">
+        <header class="page-head">
+          <h1>வாடிக்கையாளர்</h1>
+        </header>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>புதிய வாடிக்கையாளர்</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-field"><label>பெயர் / கடை பெயர்</label><input type="text" id="newCustName"
+                placeholder="Ravikumar Store"></div>
+            <div class="form-field"><label>WhatsApp எண்</label><input type="tel" id="newCustPhone"
+                placeholder="91XXXXXXXXXX"></div>
+            <div class="form-field"><label>வங்கி கணக்கு விவரம் (விருப்பத்துடையது)</label><input type="text"
+                id="newCustBank" placeholder="SBI, கணக்கு எண், IFSC"></div>
+            <div class="form-field"><label>தொடக்க பாக்கி (₹)</label><input type="number" id="newCustOpeningBalance"
+                min="0" step="1" placeholder="0.00"></div>
+            <button class="btn btn-primary full-btn" id="addCustBtn">+ சேர்க்க</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>வாடிக்கையாளர் பட்டியல்</h2><span class="muted" id="custCountLabel"></span>
+          </div>
+          <div id="custCards"></div>
+        </div>
+      </section>
+
+      <!-- REPORTS -->
+      <section class="tab" id="tab-reports">
+        <header class="page-head">
+          <h1>அறிக்கை</h1>
+        </header>
+
+        <!-- Bill Selection & Thermal Print -->
+        <div class="panel thermal-select-panel">
+          <div class="panel-head">
+            <h2>🖨 பில் தேர்வு &amp; பிரிண்ட்</h2><span class="muted">80mm Thermal</span>
+          </div>
+          <div class="form-stack">
+            <div class="form-row">
+              <div class="form-field grow"><label>தொடக்க தேதி</label><input type="date" id="selectFrom"></div>
+              <div class="form-field grow"><label>முடிவு தேதி</label><input type="date" id="selectTo"></div>
+            </div>
+            <div class="form-field"><label>வாடிக்கையாளர் (விருப்பத்துடையது)</label>
+              <select id="selectCustomerFilter">
+                <option value="">எல்லா வாடிக்கையாளர்</option>
+              </select>
+            </div>
+            <div class="form-row gap-sm">
+              <button class="btn btn-secondary grow" id="loadSelectBillsBtn">பில்கள் ஏற்று</button>
+              <button class="btn btn-primary grow" id="printSelectedBtn" disabled>🖨 பிரிண்ட்</button>
+            </div>
+          </div>
+          <div class="select-bar" id="selectCountBar" style="display:none;">
+            <span><strong id="selectedCount">0</strong> பில்கள் தேர்வு</span>
+            <div>
+              <button class="btn btn-ghost btn-sm" id="selectAllBtn">எல்லாம்</button>
+              <button class="btn btn-ghost btn-sm" id="deselectAllBtn">நீக்கு</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="selectBillsTable">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="selectAllChk"></th>
+                  <th>பில் எண்</th>
+                  <th>தேதி</th>
+                  <th>வாடிக்கையாளர்</th>
+                  <th>தொகை</th>
+                  <th>கூலி</th>
+                  <th>மொத்தம்</th>
+                </tr>
+              </thead>
+              <tbody id="selectBillsBody"></tbody>
+            </table>
+            <div class="empty-state" id="selectBillsEmpty">தேதி வரம்பை தேர்வு செய்து "பில்கள் ஏற்று" அழுத்தவும்.</div>
+          </div>
+        </div>
+
+        <!-- Summary Report -->
+        <div class="panel">
+          <div class="panel-head">
+            <h2>விற்பனை சுருக்கம்</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-row">
+              <div class="form-field grow"><label>தொடக்க தேதி</label><input type="date" id="reportFrom"></div>
+              <div class="form-field grow"><label>முடிவு தேதி</label><input type="date" id="reportTo"></div>
+            </div>
+            <button class="btn btn-primary full-btn" id="runReportBtn">அறிக்கை காண்பி</button>
+          </div>
+        </div>
+        <div class="stat-grid" id="reportStats" style="display:none;">
+          <div class="stat-card torn">
+            <div class="stat-label">பில்கள்</div>
+            <div class="stat-value" id="reportBillCount">0</div>
+          </div>
+          <div class="stat-card torn">
+            <div class="stat-label">மொத்த விற்பனை</div>
+            <div class="stat-value" id="reportTotalSales">₹0</div>
+          </div>
+          <div class="stat-card torn">
+            <div class="stat-label">சராசரி பில்</div>
+            <div class="stat-value" id="reportAvgBill">₹0</div>
+          </div>
+        </div>
+        <div class="panel" id="reportSalesPanel" style="display:none;">
+          <div class="panel-head">
+            <h2>பில்கள்</h2><button class="btn btn-secondary" id="downloadSalesBtn">⬇ CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="reportSalesTable">
+              <thead>
+                <tr>
+                  <th>பில் எண்</th>
+                  <th>தேதி</th>
+                  <th>வாடிக்கையாளர்</th>
+                  <th>தொகை</th>
+                  <th>கூலி</th>
+                  <th>மொத்தம்</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-state" id="reportSalesEmpty">இந்த வரம்பில் பில் இல்லை.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="tab" id="tab-settings">
+        <header class="page-head">
+          <h1>அமைப்புகள்</h1>
+        </header>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>கடை விவரங்கள்</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-field"><label>கடையின் பெயர்</label><input type="text" id="setShopName"></div>
+            <div class="form-field"><label>கடை வகை / துணை பெயர்</label><input type="text" id="setShopSub"></div>
+            <div class="form-field"><label>முகவரி</label><input type="text" id="setShopAddress"></div>
+            <div class="form-field"><label>தொலைபேசி எண்</label><input type="text" id="setShopPhone"></div>
+            <div class="form-field"><label>உரிமையாளர் பெயர்</label><input type="text" id="setOwnerName"></div>
+            <div class="form-field"><label>அடுத்த பில் எண்</label><input type="number" id="setNextBillNo" min="1"></div>
+            <button class="btn btn-primary full-btn" id="saveSettingsBtn">சேமி</button>
+            <span class="save-confirm" id="settingsSaved">சேமிக்கப்பட்டது ✓</span>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>🔒 கடவுச்சொல் மாற்று</h2>
+          </div>
+          <div class="form-stack">
+            <div class="form-field">
+              <label>தற்போதைய கடவுச்சொல்</label>
+              <input type="password" id="currentPw" placeholder="தற்போதைய கடவுச்சொல்" autocomplete="current-password">
+            </div>
+            <div class="form-field">
+              <label>புதிய கடவுச்சொல்</label>
+              <input type="password" id="newPw" placeholder="புதிய கடவுச்சொல் (min 4 எழுத்து)"
+                autocomplete="new-password">
+            </div>
+            <div class="form-field">
+              <label>புதிய கடவுச்சொல் உறுதிப்படுத்து</label>
+              <input type="password" id="confirmPw" placeholder="மீண்டும் உள்ளிடவும்" autocomplete="new-password">
+            </div>
+            <div id="pwError" style="color:#C0392B;font-size:13px;display:none;"></div>
+            <button class="btn btn-primary full-btn" id="changePasswordBtn">கடவுச்சொல் மாற்று</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>தரவு காப்பு</h2>
+          </div>
+          <p class="muted" style="margin-bottom:14px;">தரவை பதிவிறக்கி வைத்துக்கொள்ளவும். மீட்டமைக்க JSON பைல் ஏற்றலாம்.
+          </p>
+          <div class="form-stack">
+            <button class="btn btn-secondary full-btn" id="exportDataBtn">⬇ முழு தரவு பதிவிறக்கம் (JSON)</button>
+            <label class="btn btn-secondary full-btn file-btn">⬆ தரவு மீட்டமை<input type="file" id="importDataInput"
+                accept=".json" hidden></label>
+            <button class="btn btn-ghost full-btn" id="logoutBtn" style="margin-top:8px;">🚪 வெளியேறு (Logout)</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- New Customer Quick Modal -->
+  <div class="modal hidden" id="custModal">
+    <div class="modal-box">
+      <h2>புதிய வாடிக்கையாளர்</h2>
+      <div class="form-stack">
+        <div class="form-field"><label>பெயர் / கடை பெயர்</label><input type="text" id="qcName"></div>
+        <div class="form-field"><label>WhatsApp எண்</label><input type="tel" id="qcPhone" placeholder="91XXXXXXXXXX">
+        </div>
+        <div class="form-field"><label>வங்கி கணக்கு விவரம்</label><input type="text" id="qcBank"></div>
+        <div class="form-field"><label>தொடக்க பாக்கி (₹)</label><input type="number" id="qcBalance" min="0" value="0">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="qcCancel">ரத்து</button>
+        <button class="btn btn-primary" id="qcSave">சேமி</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Customer Ledger Modal -->
+  <div class="modal hidden" id="ledgerModal">
+    <div class="modal-box ledger-box">
+      <h2 id="ledgerTitle">கணக்கு பட்டியல்</h2>
+      <div class="ledger-balance" id="ledgerBalance"></div>
+      <div class="table-wrap">
+        <table class="data-table" id="ledgerTable">
+          <thead>
+            <tr>
+              <th>தேதி</th>
+              <th>விவரம்</th>
+              <th class="num-cell">பில்</th>
+              <th class="num-cell">பணம்</th>
+              <th class="num-cell">பாக்கி</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="ledgerEmpty">பதிவுகள் இல்லை.</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="ledgerCloseBtn">மூடு</button>
+        <button class="btn btn-secondary" id="ledgerDownloadBtn">⬇ CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bill Print/Download/Share Modal -->
+  <div class="modal hidden" id="printModal">
+    <div class="modal-box receipt-modal-box">
+      <div class="receipt" id="billPrintArea"></div>
+      <div class="modal-actions no-print">
+        <button class="btn btn-ghost" id="closePrintBtn">மூடு</button>
+        <button class="btn btn-secondary" id="shareBtn">📤 பகிர்</button>
+        <button class="btn btn-secondary" id="downloadImgBtn">⬇ படம்</button>
+        <button class="btn btn-primary" id="printBtn">🖨 Print</button>
+      </div>
+      <div id="imgLoader" class="img-loader hidden">படம் உருவாக்குகிறது...</div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="app.js"></script>
+</body>
+
+</html>
