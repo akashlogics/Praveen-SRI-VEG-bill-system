@@ -1,7 +1,15 @@
 {
-  "name": "veggie-billing",
-  "version": "3.0.0",
+  "name": "sri-km-vegetables-billing",
+  "version": "1.0.0",
+  "description": "SRI K.M. VEGETABLES — billing & daily ledger app (frontend static site served by Express, data in Supabase)",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "^4.19.2" }
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
 }

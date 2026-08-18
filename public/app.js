@@ -1,861 +1,1276 @@
 /* ============================================================
-   காய்கறி பில்லிங் v3 — Thermal Printer Ready
-   Changes: vehicleRent in bills, thermal 80mm print,
-            bill selection & bulk print in reports
+   SRI K.M. VEGETABLES — Billing App
+   Data lives in Supabase (see db.js). This file keeps the exact
+   same in-memory arrays/render logic as the earlier localStorage
+   version — only the load/save points now go through DB.* calls.
    ============================================================ */
 
-const API = '/api';
+const DEFAULT_SHOP = {
+  tagline: 'ஸ்ரீ மீன்குளத்தி பகவதி அம்மன் துணை',
+  name: 'SRI',
+  nameMid: 'K.M.',
+  nameBottom: 'VEGETABLES',
+  sub: 'Wholesale Suppliers',
+  address: '29/434 U.M.C. Market, Ooty.',
+  phone: '94434 06210, 91590 72255',
+  nextBillNo: 1001
+};
 
-async function api(method, url, body) {
-  const opts = { method, headers: {} };
-  if (body !== undefined) { opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
-  let res;
-  try { res = await fetch(API + url, opts); }
-  catch(e) { setServerStatus(false); throw new Error('சர்வருடன் இணைக்க முடியவில்லை.\nstart.bat-ஐ இயக்கி refresh செய்யவும்.'); }
-  setServerStatus(true);
-  let data; try { data = await res.json(); } catch(e) { data=null; }
-  if (!res.ok) throw new Error((data&&data.error)||'ஏதோ தவறு நடந்தது');
-  return data;
+/* ---------------- App state ----------------
+   Populated by boot() -> DB.fetchAll() once the shop PIN is verified.
+   Stays empty/blank until then; the login gate covers the screen
+   so no tab can be interacted with before this is filled in. */
+let shop = { ...DEFAULT_SHOP };
+let items = [];
+let customers = [];
+let bills = [];
+let payments = [];
+
+/* ---------------- Balance engine ----------------
+   Every customer has an `openingBalance` (set once, e.g. when they are
+   first added, or when migrating old paper accounts).
+   Their balance on any date = openingBalance
+                                + sum of all bill totals dated <= that date
+                                - sum of all payments dated <= that date
+   This mirrors the paper ledger exactly: முதல் பாக்கி + பொருள் எடுக்கது
+   - ரூ. கொடுத்தது = பாக்கி, and lets us reconstruct any past day's row
+   without storing a separate snapshot per day. */
+function customerBillsOn(custId, dateISO) {
+  return bills.filter(b => b.customerId === custId && b.dateISO === dateISO);
+}
+function customerPaymentsOn(custId, dateISO) {
+  return payments.filter(p => p.customerId === custId && p.dateISO === dateISO);
+}
+function sumBillsUpto(custId, dateISO, inclusive) {
+  return bills
+    .filter(b => b.customerId === custId && (inclusive ? b.dateISO <= dateISO : b.dateISO < dateISO))
+    .reduce((s, b) => s + b.total, 0);
+}
+function sumPaymentsUpto(custId, dateISO, inclusive) {
+  return payments
+    .filter(p => p.customerId === custId && (inclusive ? p.dateISO <= dateISO : p.dateISO < dateISO))
+    .reduce((s, p) => s + p.amount, 0);
+}
+// Balance as of end of given date (default: today) — this is what should be
+// shown everywhere as "current பாக்கி".
+function customerBalanceAsOf(cust, dateISO) {
+  const opening = Number(cust.openingBalance) || 0;
+  return opening + sumBillsUpto(cust.id, dateISO, true) - sumPaymentsUpto(cust.id, dateISO, true);
+}
+function customerCurrentBalance(cust) {
+  return customerBalanceAsOf(cust, todayISO());
+}
+// Opening balance for a *specific day's ledger row* = balance just before
+// that day's transactions.
+function customerOpeningForDate(cust, dateISO) {
+  const opening = Number(cust.openingBalance) || 0;
+  return opening + sumBillsUpto(cust.id, dateISO, false) - sumPaymentsUpto(cust.id, dateISO, false);
 }
 
-function setServerStatus(ok) {
-  const el = document.getElementById('serverStatus');
-  if (!el) return;
-  el.classList.toggle('offline', !ok);
-  el.innerHTML = ok ? 'தரவு பாதுகாப்பாக<br>சேமிக்கப்படும்' : '⚠️ சர்வர் இல்லை!<br>start.bat-ஐ இயக்கவும்';
+let billRowCounter = 0; // unique ids for bill item rows
+
+/* ---------------- Utility ---------------- */
+function uid(prefix) {
+  return prefix + Date.now().toString(36) + Math.floor(Math.random() * 1000);
 }
-
-/* -------- cached state -------- */
-let shop = {}, items = [], customers = [], trucks = [];
-let billRowCounter = 0, stockRowCounter = 0;
-let currentPrintBill = null, currentLedgerCustomer = null;
-let lastReport = { bills:[], stockTrips:[], salaries:[], from:'', to:'' };
-let selectableBills = [];    // bills loaded in the selection panel
-
-/* -------- utils -------- */
-function money(n){ n=Number(n)||0; return '₹'+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function plain(n){ n=Number(n)||0; return n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function pad(n){ return n.toString().padStart(2,'0'); }
-function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
-function fmt(iso){ if(!iso) return ''; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
-function esc(s){ const div=document.createElement('div'); div.textContent=s??''; return div.innerHTML; }
-function findItem(id)    { return items.find(x=>x.id===Number(id)); }
-function findCustomer(id){ return customers.find(x=>x.id===Number(id)); }
-function findTruck(id)   { return trucks.find(x=>x.id===Number(id)); }
-function showErr(e)      { alert(e.message||String(e)); }
-
-function dlCSV(content, name){
-  const blob=new Blob(['\uFEFF'+content],{type:'text/csv;charset=utf-8;'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+function money(n) {
+  n = Number(n) || 0;
+  return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-function dlJSON(obj, name){
-  const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+function plainMoney(n) {
+  n = Number(n) || 0;
+  return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function todayISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+function pad(n) { return n.toString().padStart(2, '0'); }
+function formatDateDisplay(iso) {
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+}
+function formatTimeDisplay(date) {
+  let h = date.getHours();
+  const m = pad(date.getMinutes());
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${pad(h)}:${m} ${ampm}`;
+}
+function findItem(id) { return items.find(it => it.id === id); }
+function findCustomer(id) { return customers.find(c => c.id === id); }
+function shopFullName() {
+  return [shop.name, shop.nameMid, shop.nameBottom].filter(Boolean).join(' ');
 }
 
 /* ============================================================
    NAVIGATION
    ============================================================ */
-document.querySelectorAll('.nav-btn').forEach(btn=>{
-  btn.addEventListener('click',()=>switchTab(btn.dataset.tab));
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
-async function switchTab(tab){
-  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.id==='tab-'+tab));
-  if(tab==='dashboard') await renderDashboard();
-  if(tab==='newbill')   await renderNewBillTab();
-  if(tab==='payments')  await renderPaymentsTab();
-  if(tab==='items')     await renderItemsTab();
-  if(tab==='customers') await renderCustomersTab();
-  if(tab==='trucks')    await renderTrucksTab();
-  if(tab==='reports')   await renderReportsTab();
-  if(tab==='settings')  await renderSettingsTab();
+function switchTab(tab) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + tab));
+  if (tab === 'dashboard') renderDashboard();
+  if (tab === 'newbill') renderNewBillTab();
+  if (tab === 'ledger') renderLedgerTab();
+  if (tab === 'monthly') renderMonthlyTab();
+  if (tab === 'items') renderItemsTab();
+  if (tab === 'customers') renderCustomersTab();
+  if (tab === 'settings') renderSettingsTab();
 }
-document.getElementById('dashNewBillBtn').addEventListener('click',()=>switchTab('newbill'));
+document.getElementById('dashNewBillBtn').addEventListener('click', () => switchTab('newbill'));
 
 /* ============================================================
    DASHBOARD
    ============================================================ */
-async function renderDashboard(){
-  if(shop.name) document.getElementById('brandShopName').textContent=shop.name;
-  const now=new Date();
-  document.getElementById('todayDateDisplay').textContent=
-    fmt(todayISO())+' • '+now.toLocaleDateString('ta-IN',{weekday:'long'});
+function renderDashboard() {
+  document.getElementById('brandShopName').textContent = shopFullName();
+  const now = new Date();
+  document.getElementById('todayDateDisplay').textContent =
+    formatDateDisplay(todayISO()) + ' • ' + now.toLocaleDateString('ta-IN', { weekday: 'long' });
 
-  let d; try{d=await api('GET','/dashboard');}catch(e){showErr(e);return;}
+  const today = todayISO();
+  const month = today.slice(0, 7); // YYYY-MM
 
-  document.getElementById('statTodaySales').textContent    =money(d.todaySales);
-  document.getElementById('statTodayBills').textContent    =`${d.todayCount} பில்கள்`;
-  document.getElementById('statMonthSales').textContent    =money(d.monthSales);
-  document.getElementById('statMonthBills').textContent    =`${d.monthCount} பில்கள்`;
-  document.getElementById('statPending').textContent       =money(d.totalPending);
-  document.getElementById('statCustomerCount').textContent =`${d.customerCount} வாடிக்கையாளர்`;
-  document.getElementById('statItemCount').textContent     =d.itemCount;
-  document.getElementById('statMonthPurchases').textContent=money(d.monthPurchases);
-  document.getElementById('statMonthSalaries').textContent =money(d.monthSalaries);
-  document.getElementById('statTruckCount').textContent    =`${d.truckCount} டிரக்குகள்`;
+  let todaySales = 0, todayCount = 0, monthSales = 0, monthCount = 0;
+  bills.forEach(b => {
+    if (b.dateISO === today) { todaySales += b.total; todayCount++; }
+    if (b.dateISO.slice(0, 7) === month) { monthSales += b.total; monthCount++; }
+  });
 
-  const tbody=document.querySelector('#recentBillsTable tbody');
-  tbody.innerHTML='';
-  document.getElementById('recentBillsEmpty').style.display=d.recentBills.length?'none':'block';
-  [...d.recentBills].reverse().forEach(b=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${b.billNo}</td><td>${fmt(b.dateISO)}</td><td>${esc(b.customerName)}</td>
-      <td>${money(b.total)}</td><td>${money(b.grandTotal)}</td>
-      <td><button class="btn btn-ghost vb" data-id="${b.id}">🖨 காண்க</button></td>`;
+  document.getElementById('statTodaySales').textContent = money(todaySales);
+  document.getElementById('statTodayBills').textContent = `${todayCount} பில்கள்`;
+  document.getElementById('statMonthSales').textContent = money(monthSales);
+  document.getElementById('statMonthBills').textContent = `${monthCount} பில்கள்`;
+
+  const totalPending = customers.reduce((s, c) => s + customerCurrentBalance(c), 0);
+  document.getElementById('statPending').textContent = money(totalPending);
+  document.getElementById('statCustomerCount').textContent = `${customers.length} வாடிக்கையாளர்`;
+  document.getElementById('statItemCount').textContent = items.length;
+
+  // Recent bills (latest 8)
+  const tbody = document.querySelector('#recentBillsTable tbody');
+  tbody.innerHTML = '';
+  const recent = [...bills].sort((a, b) => b.createdAt - a.createdAt).slice(0, 8);
+  document.getElementById('recentBillsEmpty').style.display = recent.length ? 'none' : 'block';
+  recent.forEach(b => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${b.billNo}</td>
+      <td>${formatDateDisplay(b.dateISO)}</td>
+      <td>${escapeHtml(b.customerName)}</td>
+      <td>${money(b.total)}</td>
+      <td>${money(b.grandTotal)}</td>
+      <td><button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button></td>
+    `;
     tbody.appendChild(tr);
   });
-  tbody.querySelectorAll('.vb').forEach(btn=>btn.addEventListener('click',()=>openPrintById(btn.dataset.id)));
+  tbody.querySelectorAll('.view-bill-btn').forEach(btn => {
+    btn.addEventListener('click', () => openPrintModal(bills.find(b => b.id === btn.dataset.id)));
+  });
+}
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str ?? '';
+  return div.innerHTML;
 }
 
 /* ============================================================
-   NEW BILL
+   NEW BILL TAB
    ============================================================ */
-async function renderNewBillTab(){
-  try{ [items,customers]=await Promise.all([api('GET','/items'),api('GET','/customers')]); }
-  catch(e){showErr(e);return;}
-  fillCustSelect('billCustomerSelect');
-  updatePrevBal();
-  if(!document.getElementById('billItemsBody').children.length) addBillRow();
-  recalcBill();
+function renderNewBillTab() {
+  populateCustomerSelect();
+  updatePrevBalanceDisplay();
+  if (document.getElementById('billItemsBody').children.length === 0) {
+    addBillRow();
+  }
+  recalcBillTotals();
 }
 
-function fillCustSelect(id){
-  const sel=document.getElementById(id), cur=sel.value;
-  sel.innerHTML='<option value="">-- தேர்வு செய்யவும் --</option>';
-  [...customers].sort((a,b)=>a.name.localeCompare(b.name,'ta')).forEach(c=>{
-    const o=document.createElement('option');
-    o.value=c.id; o.textContent=c.name+(c.phone?` (${c.phone})`:'');
-    sel.appendChild(o);
+function populateCustomerSelect() {
+  const sel = document.getElementById('billCustomerSelect');
+  const currentVal = sel.value;
+  sel.innerHTML = '<option value="">-- தேர்வு செய்யவும் --</option>';
+  customers.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = `${c.name}${c.phone ? ' (' + c.phone + ')' : ''}`;
+    sel.appendChild(opt);
   });
-  if(customers.some(c=>String(c.id)===cur)) sel.value=cur;
+  if (customers.some(c => c.id === currentVal)) sel.value = currentVal;
 }
 
-document.getElementById('billCustomerSelect').addEventListener('change',updatePrevBal);
-function updatePrevBal(){
-  const cust=findCustomer(document.getElementById('billCustomerSelect').value);
-  const prev=cust?(Number(cust.balance)||0):0;
-  document.querySelector('#prevBalanceLine strong').textContent=money(prev);
-  document.getElementById('billPrevBalanceVal').textContent=money(prev);
-  recalcBill();
+document.getElementById('billCustomerSelect').addEventListener('change', updatePrevBalanceDisplay);
+
+function updatePrevBalanceDisplay() {
+  const custId = document.getElementById('billCustomerSelect').value;
+  const cust = findCustomer(custId);
+  const prev = cust ? customerCurrentBalance(cust) : 0;
+  document.querySelector('#prevBalanceLine strong').textContent = money(prev);
+  document.getElementById('billPrevBalanceVal').textContent = money(prev);
+  recalcBillTotals();
 }
 
-document.getElementById('addItemRowBtn').addEventListener('click',addBillRow);
-function addBillRow(){
-  const tbody=document.getElementById('billItemsBody');
-  const tr=document.createElement('tr');
-  tr.dataset.rowId=++billRowCounter;
-  const opts=['<option value="">-- பொருள் --</option>',
-    ...items.map(it=>`<option value="${it.id}">${esc(it.name)}</option>`)].join('');
-  tr.innerHTML=`
-    <td class="col-item"><select class="ri">${opts}</select></td>
-    <td class="col-qty"><input type="number" class="rq" min="0" step="0.5" placeholder="0"></td>
-    <td class="col-unit"><span class="ru muted">—</span></td>
-    <td class="col-price"><input type="number" class="rp" min="0" step="0.5" placeholder="0.00"></td>
-    <td class="col-value"><span class="rv">₹0.00</span></td>
-    <td class="col-del"><button class="row-del-btn">✕</button></td>`;
+document.getElementById('addItemRowBtn').addEventListener('click', () => addBillRow());
+
+function addBillRow() {
+  const tbody = document.getElementById('billItemsBody');
+  const rowId = 'row' + (++billRowCounter);
+  const tr = document.createElement('tr');
+  tr.dataset.rowId = rowId;
+
+  const itemOptions = ['<option value="">-- பொருள் --</option>']
+    .concat(items.map(it => `<option value="${it.id}">${escapeHtml(it.name)}</option>`))
+    .join('');
+
+  tr.innerHTML = `
+    <td class="col-item"><select class="row-item-select">${itemOptions}</select></td>
+    <td class="col-qty"><input type="number" class="row-qty" min="0" step="0.5" placeholder="0"></td>
+    <td class="col-unit"><span class="row-unit muted">—</span></td>
+    <td class="col-price"><input type="number" class="row-price" min="0" step="0.5" placeholder="0.00"></td>
+    <td class="col-value"><span class="row-value">₹0.00</span></td>
+    <td class="col-del"><button class="row-del-btn" title="நீக்கு">✕</button></td>
+  `;
   tbody.appendChild(tr);
-  const sel=tr.querySelector('.ri'),qty=tr.querySelector('.rq'),
-        prc=tr.querySelector('.rp'),unit=tr.querySelector('.ru');
-  sel.addEventListener('change',()=>{
-    const it=findItem(sel.value);
-    if(it){unit.textContent=it.unit;unit.classList.remove('muted');prc.value=it.price;}
-    else  {unit.textContent='—';unit.classList.add('muted');prc.value='';}
-    recalcBillRow(tr);
+
+  const itemSelect = tr.querySelector('.row-item-select');
+  const qtyInput = tr.querySelector('.row-qty');
+  const priceInput = tr.querySelector('.row-price');
+  const unitSpan = tr.querySelector('.row-unit');
+
+  itemSelect.addEventListener('change', () => {
+    const it = findItem(itemSelect.value);
+    if (it) {
+      unitSpan.textContent = it.unit;
+      unitSpan.classList.remove('muted');
+      priceInput.value = it.price;
+    } else {
+      unitSpan.textContent = '—';
+      unitSpan.classList.add('muted');
+      priceInput.value = '';
+    }
+    recalcRow(tr);
   });
-  qty.addEventListener('input',()=>recalcBillRow(tr));
-  prc.addEventListener('input',()=>recalcBillRow(tr));
-  tr.querySelector('.row-del-btn').addEventListener('click',()=>{tr.remove();recalcBill();});
-}
-function recalcBillRow(tr){
-  const q=parseFloat(tr.querySelector('.rq').value)||0, p=parseFloat(tr.querySelector('.rp').value)||0;
-  tr.querySelector('.rv').textContent=money(q*p);
-  recalcBill();
+  qtyInput.addEventListener('input', () => recalcRow(tr));
+  priceInput.addEventListener('input', () => recalcRow(tr));
+  tr.querySelector('.row-del-btn').addEventListener('click', () => {
+    tr.remove();
+    recalcBillTotals();
+  });
 }
 
-document.getElementById('vehicleRentInput').addEventListener('input',recalcBill);
-function recalcBill(){
-  let tot=0;
-  document.querySelectorAll('#billItemsBody tr').forEach(tr=>{
-    tot+=(parseFloat(tr.querySelector('.rq').value)||0)*(parseFloat(tr.querySelector('.rp').value)||0);
-  });
-  const cust=findCustomer(document.getElementById('billCustomerSelect').value);
-  const prev=cust?(Number(cust.balance)||0):0;
-  const vr=parseFloat(document.getElementById('vehicleRentInput').value)||0;
-  document.getElementById('billTodayTotal').textContent  =money(tot);
-  document.getElementById('billPrevBalanceVal').textContent=money(prev);
-  document.getElementById('billGrandTotal').textContent  =money(tot+prev+vr);
+function recalcRow(tr) {
+  const qty = parseFloat(tr.querySelector('.row-qty').value) || 0;
+  const price = parseFloat(tr.querySelector('.row-price').value) || 0;
+  const value = qty * price;
+  tr.querySelector('.row-value').textContent = money(value);
+  recalcBillTotals();
 }
 
-document.getElementById('clearBillBtn').addEventListener('click',()=>{
-  if(!confirm('இந்த பில்லை அழிக்கவா?')) return;
-  document.getElementById('billItemsBody').innerHTML='';
-  document.getElementById('billCustomerSelect').value='';
-  document.getElementById('vehicleRentInput').value='';
-  addBillRow(); updatePrevBal();
+function recalcBillTotals() {
+  let total = 0;
+  document.querySelectorAll('#billItemsBody tr').forEach(tr => {
+    const qty = parseFloat(tr.querySelector('.row-qty').value) || 0;
+    const price = parseFloat(tr.querySelector('.row-price').value) || 0;
+    total += qty * price;
+  });
+  const custId = document.getElementById('billCustomerSelect').value;
+  const cust = findCustomer(custId);
+  const prev = cust ? customerCurrentBalance(cust) : 0;
+
+  document.getElementById('billTodayTotal').textContent = money(total);
+  document.getElementById('billPrevBalanceVal').textContent = money(prev);
+  document.getElementById('billGrandTotal').textContent = money(total + prev);
+}
+
+document.getElementById('clearBillBtn').addEventListener('click', () => {
+  if (!confirm('இந்த பில்லை அழிக்கவா?')) return;
+  document.getElementById('billItemsBody').innerHTML = '';
+  document.getElementById('billCustomerSelect').value = '';
+  addBillRow();
+  updatePrevBalanceDisplay();
 });
 
-document.getElementById('saveBillBtn').addEventListener('click', async()=>{
-  const custId=document.getElementById('billCustomerSelect').value;
-  if(!custId){alert('வாடிக்கையாளரை தேர்வு செய்யவும்.');return;}
-  const rows=[];
-  document.querySelectorAll('#billItemsBody tr').forEach(tr=>{
-    const itemId=tr.querySelector('.ri').value;
-    const qty=parseFloat(tr.querySelector('.rq').value)||0;
-    const price=parseFloat(tr.querySelector('.rp').value)||0;
-    if(!itemId||qty<=0) return;
-    const it=findItem(itemId);
-    rows.push({name:it?it.name:'—',unit:it?it.unit:'',qty,price});
-  });
-  if(!rows.length){alert('குறைந்தது ஒரு பொருளையாவது சேர்க்கவும்.');return;}
-  const vehicleRent=parseFloat(document.getElementById('vehicleRentInput').value)||0;
-  let bill;
-  try{
-    bill=await api('POST','/bills',{customerId:Number(custId),items:rows,vehicleRent});
-    [shop,customers]=await Promise.all([api('GET','/shop'),api('GET','/customers')]);
-  }catch(e){showErr(e);return;}
-  document.getElementById('billItemsBody').innerHTML='';
-  document.getElementById('billCustomerSelect').value='';
-  document.getElementById('vehicleRentInput').value='';
-  addBillRow(); fillCustSelect('billCustomerSelect'); updatePrevBal();
-  openPrintModal(bill);
-});
+document.getElementById('saveBillBtn').addEventListener('click', saveBill);
 
-/* ---- Quick add customer from new-bill tab ---- */
-const custModal=document.getElementById('custModal');
-document.getElementById('newCustomerQuickBtn').addEventListener('click',()=>{
-  ['qcName','qcPhone','qcBank'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('qcBalance').value=0;
+async function saveBill() {
+  const custId = document.getElementById('billCustomerSelect').value;
+  const cust = findCustomer(custId);
+  if (!cust) {
+    alert('வாடிக்கையாளரை தேர்வு செய்யவும்.');
+    return;
+  }
+
+  const rows = [];
+  document.querySelectorAll('#billItemsBody tr').forEach(tr => {
+    const itemId = tr.querySelector('.row-item-select').value;
+    const qty = parseFloat(tr.querySelector('.row-qty').value) || 0;
+    const price = parseFloat(tr.querySelector('.row-price').value) || 0;
+    if (!itemId || qty <= 0) return;
+    const it = findItem(itemId);
+    rows.push({
+      name: it ? it.name : '—',
+      unit: it ? it.unit : '',
+      qty, price, value: qty * price
+    });
+  });
+
+  if (rows.length === 0) {
+    alert('குறைந்தது ஒரு பொருளையாவது சேர்க்கவும்.');
+    return;
+  }
+
+  const total = rows.reduce((s, r) => s + r.value, 0);
+  const prevBalance = customerCurrentBalance(cust);
+  const grandTotal = total + prevBalance;
+  const now = new Date();
+
+  const bill = {
+    id: uid('bill_'),
+    billNo: shop.nextBillNo,
+    dateISO: todayISO(),
+    timeDisplay: formatTimeDisplay(now),
+    createdAt: now.getTime(),
+    customerId: cust.id,
+    customerName: cust.name,
+    customerPhone: cust.phone || '',
+    items: rows,
+    total,
+    prevBalance,
+    grandTotal
+  };
+
+  const saveBtn = document.getElementById('saveBillBtn');
+  saveBtn.disabled = true;
+  try {
+    await DB.insertBill(bill);
+    bills.push(bill);
+
+    shop.nextBillNo = shop.nextBillNo + 1;
+    await DB.saveShop(shop);
+
+    // Reset form
+    document.getElementById('billItemsBody').innerHTML = '';
+    document.getElementById('billCustomerSelect').value = '';
+    addBillRow();
+    updatePrevBalanceDisplay();
+    populateCustomerSelect();
+
+    openPrintModal(bill);
+  } catch (err) {
+    alert('பில்லை சேமிக்க முடியவில்லை — இணையம் இணைப்பை சரிபார்க்கவும்.');
+    console.error(err);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+/* ---------------- Quick Add Customer (modal) ---------------- */
+const custModal = document.getElementById('custModal');
+document.getElementById('newCustomerQuickBtn').addEventListener('click', () => {
+  document.getElementById('qcName').value = '';
+  document.getElementById('qcPhone').value = '';
+  document.getElementById('qcBalance').value = 0;
   custModal.classList.remove('hidden');
   document.getElementById('qcName').focus();
 });
-document.getElementById('qcCancel').addEventListener('click',()=>custModal.classList.add('hidden'));
-document.getElementById('qcSave').addEventListener('click', async()=>{
-  const name=document.getElementById('qcName').value.trim();
-  if(!name){alert('பெயரை குறிப்பிடவும்.');return;}
-  let cust;
-  try{
-    cust=await api('POST','/customers',{
-      name,phone:document.getElementById('qcPhone').value.trim(),
-      bankDetails:document.getElementById('qcBank').value.trim(),
-      balance:parseFloat(document.getElementById('qcBalance').value)||0
-    });
-    customers=await api('GET','/customers');
-  }catch(e){showErr(e);return;}
-  custModal.classList.add('hidden');
-  fillCustSelect('billCustomerSelect');
-  document.getElementById('billCustomerSelect').value=cust.id;
-  updatePrevBal();
+document.getElementById('qcCancel').addEventListener('click', () => custModal.classList.add('hidden'));
+document.getElementById('qcSave').addEventListener('click', async () => {
+  const name = document.getElementById('qcName').value.trim();
+  if (!name) { alert('பெயரை குறிப்பிடவும்.'); return; }
+  const phone = document.getElementById('qcPhone').value.trim();
+  const openingBalance = parseFloat(document.getElementById('qcBalance').value) || 0;
+  const cust = { id: uid('cust_'), name, phone, openingBalance };
+  const btn = document.getElementById('qcSave');
+  btn.disabled = true;
+  try {
+    await DB.upsertCustomer(cust);
+    customers.push(cust);
+    custModal.classList.add('hidden');
+    populateCustomerSelect();
+    document.getElementById('billCustomerSelect').value = cust.id;
+    updatePrevBalanceDisplay();
+  } catch (err) {
+    alert('வாடிக்கையாளரை சேமிக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+  }
 });
-
-/* ============================================================
-   PAYMENTS TAB
-   ============================================================ */
-async function renderPaymentsTab(){
-  try{customers=await api('GET','/customers');}catch(e){showErr(e);return;}
-  fillCustSelect('paymentCustomerSelect');
-  document.getElementById('paymentDate').value=todayISO();
-  refreshPayBal();
-  await loadRecentPayments();
-}
-document.getElementById('paymentCustomerSelect').addEventListener('change',refreshPayBal);
-function refreshPayBal(){
-  const cust=findCustomer(document.getElementById('paymentCustomerSelect').value);
-  document.querySelector('#paymentBalancePreview strong').textContent=money(cust?cust.balance:0);
-}
-document.getElementById('savePaymentBtn').addEventListener('click', async()=>{
-  const custId=document.getElementById('paymentCustomerSelect').value;
-  if(!custId){alert('வாடிக்கையாளரை தேர்வு செய்யவும்.');return;}
-  const amount=parseFloat(document.getElementById('paymentAmount').value)||0;
-  if(amount<=0){alert('தொகையை சரியாக குறிப்பிடவும்.');return;}
-  try{
-    await api('POST','/payments',{
-      customerId:Number(custId),
-      dateISO:document.getElementById('paymentDate').value||todayISO(),
-      amount,mode:document.getElementById('paymentMode').value,
-      reference:document.getElementById('paymentReference').value.trim()
-    });
-    customers=await api('GET','/customers');
-  }catch(e){showErr(e);return;}
-  document.getElementById('paymentAmount').value='';
-  document.getElementById('paymentReference').value='';
-  refreshPayBal();
-  await loadRecentPayments();
-  alert('பணம் வெற்றிகரமாக பதிவு செய்யப்பட்டது ✓');
-});
-async function loadRecentPayments(){
-  let list; try{list=await api('GET','/payments');}catch(e){showErr(e);return;}
-  const tbody=document.querySelector('#paymentsTable tbody');
-  tbody.innerHTML='';
-  const recent=[...list].sort((a,b)=>b.createdAt-a.createdAt).slice(0,15);
-  document.getElementById('paymentsEmpty').style.display=recent.length?'none':'block';
-  recent.forEach(p=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${fmt(p.dateISO)}</td><td>${esc(p.customerName)}</td>
-      <td>${money(p.amount)}</td><td>${esc(p.mode)}</td>
-      <td>${esc(p.reference||'—')}</td><td>${money(p.balanceAfter)}</td>`;
-    tbody.appendChild(tr);
-  });
-}
 
 /* ============================================================
    ITEMS TAB
    ============================================================ */
-async function renderItemsTab(){
-  try{items=await api('GET','/items');}catch(e){showErr(e);return;}
-  const tbody=document.querySelector('#itemsTable tbody');
-  tbody.innerHTML='';
-  document.getElementById('itemsCountLabel').textContent=`${items.length} பொருட்கள்`;
-  [...items].sort((a,b)=>a.name.localeCompare(b.name,'ta')).forEach(it=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${esc(it.name)}</td>
-      <td><select class="ius" data-id="${it.id}">
-        ${['கிலோ','எண்ணிக்கை','கட்டு','மூட்டை'].map(u=>`<option ${u===it.unit?'selected':''}>${u}</option>`).join('')}
-      </select></td>
-      <td><input type="number" class="ipr" data-id="${it.id}" value="${it.price}" min="0" step="0.5"></td>
-      <td><button class="btn-danger-text idl" data-id="${it.id}">நீக்கு</button></td>`;
+function renderItemsTab() {
+  const tbody = document.querySelector('#itemsTable tbody');
+  tbody.innerHTML = '';
+  document.getElementById('itemsCountLabel').textContent = `${items.length} பொருட்கள்`;
+  [...items].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(it => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(it.name)}</td>
+      <td>
+        <select class="item-unit-select" data-id="${it.id}">
+          ${['கிலோ', 'எண்ணிக்கை', 'கட்டு', 'மூட்டை'].map(u =>
+            `<option value="${u}" ${u === it.unit ? 'selected' : ''}>${u}</option>`).join('')}
+        </select>
+      </td>
+      <td><input type="number" class="item-price-input" data-id="${it.id}" value="${it.price}" min="0" step="0.5"></td>
+      <td><button class="btn-danger-text item-del-btn" data-id="${it.id}">நீக்கு</button></td>
+    `;
     tbody.appendChild(tr);
   });
-  tbody.querySelectorAll('.ius').forEach(s=>s.addEventListener('change', async()=>{
-    try{await api('PUT','/items/'+s.dataset.id,{unit:s.value});items=await api('GET','/items');}catch(e){showErr(e);}
-  }));
-  tbody.querySelectorAll('.ipr').forEach(i=>i.addEventListener('change', async()=>{
-    try{await api('PUT','/items/'+i.dataset.id,{price:parseFloat(i.value)||0});items=await api('GET','/items');}catch(e){showErr(e);}
-  }));
-  tbody.querySelectorAll('.idl').forEach(b=>b.addEventListener('click', async()=>{
-    if(!confirm('இந்த பொருளை நீக்கவா?')) return;
-    try{await api('DELETE','/items/'+b.dataset.id);}catch(e){showErr(e);return;}
-    renderItemsTab();
-  }));
+
+  tbody.querySelectorAll('.item-unit-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const it = findItem(sel.dataset.id);
+      it.unit = sel.value;
+      try { await DB.upsertItem(it); } catch (err) { alert('சேமிக்க முடியவில்லை.'); console.error(err); }
+    });
+  });
+  tbody.querySelectorAll('.item-price-input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const it = findItem(inp.dataset.id);
+      it.price = parseFloat(inp.value) || 0;
+      try { await DB.upsertItem(it); } catch (err) { alert('சேமிக்க முடியவில்லை.'); console.error(err); }
+    });
+  });
+  tbody.querySelectorAll('.item-del-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('இந்த பொருளை நீக்கவா?')) return;
+      const id = btn.dataset.id;
+      try {
+        await DB.deleteItem(id);
+        items = items.filter(it => it.id !== id);
+        renderItemsTab();
+      } catch (err) {
+        alert('நீக்க முடியவில்லை.'); console.error(err);
+      }
+    });
+  });
 }
-document.getElementById('addItemBtn').addEventListener('click', async()=>{
-  const name=document.getElementById('newItemName').value.trim();
-  if(!name){alert('பொருளின் பெயரை குறிப்பிடவும்.');return;}
-  try{await api('POST','/items',{name,unit:document.getElementById('newItemUnit').value,price:parseFloat(document.getElementById('newItemPrice').value)||0});}
-  catch(e){showErr(e);return;}
-  document.getElementById('newItemName').value='';
-  document.getElementById('newItemPrice').value='';
-  renderItemsTab();
+
+document.getElementById('addItemBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newItemName').value.trim();
+  const unit = document.getElementById('newItemUnit').value;
+  const price = parseFloat(document.getElementById('newItemPrice').value) || 0;
+  if (!name) { alert('பொருளின் பெயரை குறிப்பிடவும்.'); return; }
+  const it = { id: uid('it_'), name, unit, price };
+  try {
+    await DB.upsertItem(it);
+    items.push(it);
+    document.getElementById('newItemName').value = '';
+    document.getElementById('newItemPrice').value = '';
+    renderItemsTab();
+  } catch (err) {
+    alert('பொருளை சேமிக்க முடியவில்லை.'); console.error(err);
+  }
 });
 
 /* ============================================================
    CUSTOMERS TAB
    ============================================================ */
-async function renderCustomersTab(){
-  try{customers=await api('GET','/customers');}catch(e){showErr(e);return;}
-  const tbody=document.querySelector('#customersTable tbody');
-  tbody.innerHTML='';
-  document.getElementById('custCountLabel').textContent=`${customers.length} வாடிக்கையாளர்`;
-  [...customers].sort((a,b)=>a.name.localeCompare(b.name,'ta')).forEach(c=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`
-      <td><div style="font-weight:600">${esc(c.name)}</div>
-        <button class="btn btn-ghost ldg" data-id="${c.id}" style="margin-top:5px;padding:4px 10px;font-size:12px;">📒 கணக்கு பட்டியல்</button></td>
-      <td><input type="tel" class="cph" data-id="${c.id}" value="${esc(c.phone||'')}" placeholder="91XXXXXXXXXX"></td>
-      <td><input type="text" class="cbk" data-id="${c.id}" value="${esc(c.bankDetails||'')}" placeholder="வங்கி விவரம்"></td>
-      <td><input type="number" class="cbl" data-id="${c.id}" value="${c.balance}" step="1"></td>
-      <td><button class="btn-danger-text cdl" data-id="${c.id}">நீக்கு</button></td>`;
+function renderCustomersTab() {
+  const tbody = document.querySelector('#customersTable tbody');
+  tbody.innerHTML = '';
+  document.getElementById('custCountLabel').textContent = `${customers.length} வாடிக்கையாளர்`;
+  [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(c => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(c.name)}</td>
+      <td><input type="tel" class="cust-phone-input" data-id="${c.id}" value="${escapeHtml(c.phone || '')}" placeholder="91XXXXXXXXXX"></td>
+      <td><input type="number" class="cust-balance-input" data-id="${c.id}" value="${Number(c.openingBalance) || 0}" step="1" title="இது ஆரம்ப பாக்கி மட்டும். தற்போதைய பாக்கியை மாற்ற பணம் பெற்றது / புதிய பில் பயன்படுத்தவும்."></td>
+      <td class="num strong">${money(customerCurrentBalance(c))}</td>
+      <td><button class="btn btn-ghost cust-pay-btn" data-id="${c.id}">💰 பணம் பெற்றது</button></td>
+      <td><button class="btn-danger-text cust-del-btn" data-id="${c.id}">நீக்கு</button></td>
+    `;
     tbody.appendChild(tr);
   });
-  tbody.querySelectorAll('.cph').forEach(i=>i.addEventListener('change', async()=>{
-    try{await api('PUT','/customers/'+i.dataset.id,{phone:i.value.trim()});customers=await api('GET','/customers');}catch(e){showErr(e);}
-  }));
-  tbody.querySelectorAll('.cbk').forEach(i=>i.addEventListener('change', async()=>{
-    try{await api('PUT','/customers/'+i.dataset.id,{bankDetails:i.value.trim()});customers=await api('GET','/customers');}catch(e){showErr(e);}
-  }));
-  tbody.querySelectorAll('.cbl').forEach(i=>i.addEventListener('change', async()=>{
-    try{await api('PUT','/customers/'+i.dataset.id,{balance:parseFloat(i.value)||0});customers=await api('GET','/customers');}catch(e){showErr(e);}
-  }));
-  tbody.querySelectorAll('.cdl').forEach(b=>b.addEventListener('click', async()=>{
-    const c=findCustomer(b.dataset.id);
-    if(!confirm(`"${c.name}" -ஐ நீக்கவா?`)) return;
-    try{await api('DELETE','/customers/'+b.dataset.id);}catch(e){showErr(e);return;}
-    renderCustomersTab();
-  }));
-  tbody.querySelectorAll('.ldg').forEach(b=>b.addEventListener('click',()=>openLedger(b.dataset.id)));
-}
-document.getElementById('addCustBtn').addEventListener('click', async()=>{
-  const name=document.getElementById('newCustName').value.trim();
-  if(!name){alert('பெயரை குறிப்பிடவும்.');return;}
-  try{await api('POST','/customers',{
-    name,phone:document.getElementById('newCustPhone').value.trim(),
-    bankDetails:document.getElementById('newCustBank').value.trim(),
-    balance:parseFloat(document.getElementById('newCustOpeningBalance').value)||0
-  });}catch(e){showErr(e);return;}
-  ['newCustName','newCustPhone','newCustBank','newCustOpeningBalance'].forEach(id=>document.getElementById(id).value='');
-  renderCustomersTab();
-});
 
-/* ---- Ledger modal ---- */
-const ledgerModal=document.getElementById('ledgerModal');
-async function openLedger(customerId){
-  let data; try{data=await api('GET',`/customers/${customerId}/ledger`);}catch(e){showErr(e);return;}
-  currentLedgerCustomer=data.customer;
-  document.getElementById('ledgerTitle').textContent=`கணக்கு பட்டியல் — ${data.customer.name}`;
-  document.getElementById('ledgerBalance').innerHTML=
-    `தற்போதைய பாக்கி: <strong>${money(data.customer.balance)}</strong>`+
-    (data.customer.bankDetails?`<br>வங்கி: ${esc(data.customer.bankDetails)}`:'');
-  const tbody=document.querySelector('#ledgerTable tbody');
-  tbody.innerHTML='';
-  document.getElementById('ledgerEmpty').style.display=data.entries.length?'none':'block';
-  data.entries.forEach(en=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`
-      <td>${fmt(en.dateISO)}<br><span class="muted" style="font-size:11px">${en.timeDisplay||''}</span></td>
-      <td>${esc(en.label)}</td>
-      <td class="num-cell debit">${en.debit?plain(en.debit):''}</td>
-      <td class="num-cell credit">${en.credit?plain(en.credit):''}</td>
-      <td class="num-cell">${plain(en.balanceAfter)}</td>`;
-    tbody.appendChild(tr);
+  tbody.querySelectorAll('.cust-phone-input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const c = findCustomer(inp.dataset.id);
+      c.phone = inp.value.trim();
+      try { await DB.upsertCustomer(c); } catch (err) { alert('சேமிக்க முடியவில்லை.'); console.error(err); }
+    });
   });
-  ledgerModal.classList.remove('hidden');
+  tbody.querySelectorAll('.cust-balance-input').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const c = findCustomer(inp.dataset.id);
+      c.openingBalance = parseFloat(inp.value) || 0;
+      try {
+        await DB.upsertCustomer(c);
+        renderCustomersTab();
+      } catch (err) { alert('சேமிக்க முடியவில்லை.'); console.error(err); }
+    });
+  });
+  tbody.querySelectorAll('.cust-pay-btn').forEach(btn => {
+    btn.addEventListener('click', () => openPaymentModal(btn.dataset.id));
+  });
+  tbody.querySelectorAll('.cust-del-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const c = findCustomer(btn.dataset.id);
+      if (!confirm(`"${c.name}" -ஐ நீக்கவா? இவருடைய பழைய பில்கள் அறிக்கையில் இருக்கும்.`)) return;
+      try {
+        await DB.deleteCustomer(c.id);
+        customers = customers.filter(x => x.id !== c.id);
+        renderCustomersTab();
+      } catch (err) { alert('நீக்க முடியவில்லை.'); console.error(err); }
+    });
+  });
 }
-document.getElementById('ledgerCloseBtn').addEventListener('click',()=>ledgerModal.classList.add('hidden'));
-document.getElementById('ledgerDownloadBtn').addEventListener('click', async()=>{
-  if(!currentLedgerCustomer) return;
-  let data; try{data=await api('GET',`/customers/${currentLedgerCustomer.id}/ledger`);}catch(e){showErr(e);return;}
-  let csv='தேதி,நேரம்,விவரம்,பில் (₹),பணம் (₹),பாக்கி (₹)\n';
-  data.entries.forEach(en=>{
-    csv+=`${fmt(en.dateISO)},${en.timeDisplay||''},"${en.label.replace(/"/g,'""')}",${en.debit?plain(en.debit):''},${en.credit?plain(en.credit):''},${plain(en.balanceAfter)}\n`;
-  });
-  dlCSV(csv,`statement_${data.customer.name}_${todayISO()}.csv`);
+
+document.getElementById('addCustBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newCustName').value.trim();
+  const phone = document.getElementById('newCustPhone').value.trim();
+  const openingBalance = parseFloat(document.getElementById('newCustOpeningBalance').value) || 0;
+  if (!name) { alert('பெயரை குறிப்பிடவும்.'); return; }
+  const c = { id: uid('cust_'), name, phone, openingBalance };
+  try {
+    await DB.upsertCustomer(c);
+    customers.push(c);
+    document.getElementById('newCustName').value = '';
+    document.getElementById('newCustPhone').value = '';
+    document.getElementById('newCustOpeningBalance').value = '';
+    renderCustomersTab();
+  } catch (err) {
+    alert('வாடிக்கையாளரை சேமிக்க முடியவில்லை.'); console.error(err);
+  }
 });
 
 /* ============================================================
-   TRUCKS & STOCK TAB
+   PAYMENTS ("ரூ. கொடுத்தது" — money received from customer)
    ============================================================ */
-async function renderTrucksTab(){
-  try{[trucks,items]=await Promise.all([api('GET','/trucks'),api('GET','/items')]);}catch(e){showErr(e);return;}
-  buildTrucksTable();
-  fillTruckSelect('stockTruckSelect'); fillTruckSelect('salaryTruckSelect');
-  document.getElementById('stockDate').value=todayISO();
-  document.getElementById('salaryDate').value=todayISO();
-  if(!document.getElementById('stockItemsBody').children.length) addStockRow();
-  recalcStockTotal();
-  await loadStockTrips(); await loadSalaries();
+const payModal = document.getElementById('payModal');
+let payModalCustId = null;
+
+function openPaymentModal(custId) {
+  const c = findCustomer(custId);
+  if (!c) return;
+  payModalCustId = custId;
+  document.getElementById('payCustName').textContent = c.name;
+  document.getElementById('payCurrentBalance').textContent = money(customerCurrentBalance(c));
+  document.getElementById('payDate').value = todayISO();
+  document.getElementById('payAmount').value = '';
+  document.getElementById('payNote').value = '';
+  payModal.classList.remove('hidden');
+  document.getElementById('payAmount').focus();
 }
-function buildTrucksTable(){
-  const tbody=document.querySelector('#trucksTable tbody');
-  tbody.innerHTML='';
-  document.getElementById('trucksCountLabel').textContent=`${trucks.length} டிரக்குகள்`;
-  document.getElementById('trucksEmpty').style.display=trucks.length?'none':'block';
-  trucks.forEach(t=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`
-      <td><input type="text" class="tn" data-id="${t.id}" value="${esc(t.number)}"></td>
-      <td><input type="text" class="tdr" data-id="${t.id}" value="${esc(t.driverName||'')}"></td>
-      <td><input type="tel" class="tph" data-id="${t.id}" value="${esc(t.driverPhone||'')}"></td>
-      <td><button class="btn-danger-text tdl" data-id="${t.id}">நீக்கு</button></td>`;
+document.getElementById('payCancel').addEventListener('click', () => payModal.classList.add('hidden'));
+document.getElementById('paySave').addEventListener('click', async () => {
+  const amount = parseFloat(document.getElementById('payAmount').value) || 0;
+  const dateISO = document.getElementById('payDate').value || todayISO();
+  const note = document.getElementById('payNote').value.trim();
+  if (!payModalCustId) return;
+  if (amount <= 0) { alert('சரியான தொகையை குறிப்பிடவும்.'); return; }
+  const payment = {
+    id: uid('pay_'),
+    customerId: payModalCustId,
+    dateISO,
+    amount,
+    note,
+    createdAt: Date.now()
+  };
+  const btn = document.getElementById('paySave');
+  btn.disabled = true;
+  try {
+    await DB.insertPayment(payment);
+    payments.push(payment);
+    payModal.classList.add('hidden');
+    renderCustomersTab();
+    renderDashboard();
+    if (document.getElementById('tab-ledger').classList.contains('active')) renderLedgerTab();
+  } catch (err) {
+    alert('பணம் பெற்றதை சேமிக்க முடியவில்லை.'); console.error(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ============================================================
+   DAILY LEDGER — mirrors the paper accounts sheet:
+   பெயர் | முதல் பாக்கி | பொருள் எடுக்கது | மொத்தம் | ரூ. கொடுத்தது | பாக்கி
+   ============================================================ */
+(function initLedgerDate() {
+  document.getElementById('ledgerDate').value = todayISO();
+})();
+document.getElementById('ledgerDate').addEventListener('change', renderLedgerTab);
+document.getElementById('ledgerTodayBtn').addEventListener('click', () => {
+  document.getElementById('ledgerDate').value = todayISO();
+  renderLedgerTab();
+});
+
+function renderLedgerTab() {
+  const dateISO = document.getElementById('ledgerDate').value || todayISO();
+  document.getElementById('ledgerDateLabel').textContent = formatDateDisplay(dateISO);
+
+  const tbody = document.querySelector('#ledgerTable tbody');
+  tbody.innerHTML = '';
+
+  let sumOpening = 0, sumGoods = 0, sumPaid = 0, sumClosing = 0;
+  const rows = [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta'));
+
+  document.getElementById('ledgerEmpty').style.display = rows.length ? 'none' : 'block';
+
+  rows.forEach(c => {
+    const opening = customerOpeningForDate(c, dateISO);
+    const goodsToday = customerBillsOn(c.id, dateISO).reduce((s, b) => s + b.total, 0);
+    const paidToday = customerPaymentsOn(c.id, dateISO).reduce((s, p) => s + p.amount, 0);
+    const total = opening + goodsToday;
+    const closing = total - paidToday;
+
+    sumOpening += opening; sumGoods += goodsToday; sumPaid += paidToday; sumClosing += closing;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(c.name)}</td>
+      <td class="num">${plainMoney(opening)}</td>
+      <td class="num">${goodsToday ? plainMoney(goodsToday) : '—'}</td>
+      <td class="num strong">${plainMoney(total)}</td>
+      <td class="num">${paidToday ? plainMoney(paidToday) : '—'}</td>
+      <td class="num strong">${plainMoney(closing)}</td>
+      <td>
+        <button class="btn btn-ghost ledger-bill-btn" data-id="${c.id}" title="இன்று இந்த வாடிக்கையாளருக்கு பில் போட">🧾</button>
+        <button class="btn btn-ghost ledger-pay-btn" data-id="${c.id}" title="பணம் பெற்றது சேர்">💰</button>
+      </td>
+    `;
     tbody.appendChild(tr);
   });
-  const upd=(field,cls)=>tbody.querySelectorAll(cls).forEach(i=>i.addEventListener('change', async()=>{
-    try{await api('PUT','/trucks/'+i.dataset.id,{[field]:i.value.trim()});trucks=await api('GET','/trucks');fillTruckSelect('stockTruckSelect');fillTruckSelect('salaryTruckSelect');}catch(e){showErr(e);}
-  }));
-  upd('number','.tn');upd('driverName','.tdr');upd('driverPhone','.tph');
-  tbody.querySelectorAll('.tdl').forEach(b=>b.addEventListener('click', async()=>{
-    if(!confirm('இந்த டிரக்கை நீக்கவா?')) return;
-    try{await api('DELETE','/trucks/'+b.dataset.id);trucks=await api('GET','/trucks');}catch(e){showErr(e);return;}
-    buildTrucksTable();fillTruckSelect('stockTruckSelect');fillTruckSelect('salaryTruckSelect');
-  }));
-}
-document.getElementById('addTruckBtn').addEventListener('click', async()=>{
-  const number=document.getElementById('newTruckNumber').value.trim();
-  if(!number){alert('டிரக் எண்ணை குறிப்பிடவும்.');return;}
-  try{await api('POST','/trucks',{number,driverName:document.getElementById('newTruckDriver').value.trim(),driverPhone:document.getElementById('newTruckPhone').value.trim()});trucks=await api('GET','/trucks');}
-  catch(e){showErr(e);return;}
-  ['newTruckNumber','newTruckDriver','newTruckPhone'].forEach(id=>document.getElementById(id).value='');
-  buildTrucksTable();fillTruckSelect('stockTruckSelect');fillTruckSelect('salaryTruckSelect');
-});
-function fillTruckSelect(id){
-  const sel=document.getElementById(id),cur=sel.value;
-  sel.innerHTML='<option value="">-- டிரக் தேர்வு செய்யவும் --</option>';
-  trucks.forEach(t=>{const o=document.createElement('option');o.value=t.id;o.textContent=`${t.number}${t.driverName?' — '+t.driverName:''}`;sel.appendChild(o);});
-  if(trucks.some(t=>String(t.id)===cur))sel.value=cur;
-}
-document.getElementById('addStockRowBtn').addEventListener('click',addStockRow);
-function addStockRow(){
-  const tbody=document.getElementById('stockItemsBody');
-  const tr=document.createElement('tr');tr.dataset.rowId=++stockRowCounter;
-  const opts=['<option value="">-- பொருள் --</option>',...items.map(it=>`<option value="${it.id}">${esc(it.name)}</option>`)].join('');
-  tr.innerHTML=`<td class="col-item"><select class="si">${opts}</select></td>
-    <td class="col-qty"><input type="number" class="sq" min="0" step="0.5" placeholder="0"></td>
-    <td class="col-unit"><span class="su muted">—</span></td>
-    <td class="col-price"><input type="number" class="sp" min="0" step="0.5" placeholder="0.00"></td>
-    <td class="col-value"><span class="sv">₹0.00</span></td>
-    <td class="col-del"><button class="row-del-btn">✕</button></td>`;
-  tbody.appendChild(tr);
-  const sel=tr.querySelector('.si'),qty=tr.querySelector('.sq'),prc=tr.querySelector('.sp'),unit=tr.querySelector('.su');
-  sel.addEventListener('change',()=>{const it=findItem(sel.value);if(it){unit.textContent=it.unit;unit.classList.remove('muted');}else{unit.textContent='—';unit.classList.add('muted');}recalcStockRow(tr);});
-  qty.addEventListener('input',()=>recalcStockRow(tr));
-  prc.addEventListener('input',()=>recalcStockRow(tr));
-  tr.querySelector('.row-del-btn').addEventListener('click',()=>{tr.remove();recalcStockTotal();});
-}
-function recalcStockRow(tr){const q=parseFloat(tr.querySelector('.sq').value)||0,p=parseFloat(tr.querySelector('.sp').value)||0;tr.querySelector('.sv').textContent=money(q*p);recalcStockTotal();}
-function recalcStockTotal(){let tot=0;document.querySelectorAll('#stockItemsBody tr').forEach(tr=>{tot+=(parseFloat(tr.querySelector('.sq').value)||0)*(parseFloat(tr.querySelector('.sp').value)||0);});document.getElementById('stockTotal').textContent=money(tot);}
-document.getElementById('saveStockBtn').addEventListener('click', async()=>{
-  const truckId=document.getElementById('stockTruckSelect').value;
-  if(!truckId){alert('டிரக்கை தேர்வு செய்யவும்.');return;}
-  const rows=[];
-  document.querySelectorAll('#stockItemsBody tr').forEach(tr=>{
-    const itemId=tr.querySelector('.si').value,qty=parseFloat(tr.querySelector('.sq').value)||0,price=parseFloat(tr.querySelector('.sp').value)||0;
-    if(!itemId||qty<=0) return;
-    const it=findItem(itemId);rows.push({name:it?it.name:'—',unit:it?it.unit:'',qty,price});
+
+  document.getElementById('ledgerSumOpening').textContent = plainMoney(sumOpening);
+  document.getElementById('ledgerSumGoods').textContent = plainMoney(sumGoods);
+  document.getElementById('ledgerSumTotal').textContent = plainMoney(sumOpening + sumGoods);
+  document.getElementById('ledgerSumPaid').textContent = plainMoney(sumPaid);
+  document.getElementById('ledgerSumClosing').textContent = plainMoney(sumClosing);
+
+  tbody.querySelectorAll('.ledger-pay-btn').forEach(btn => {
+    btn.addEventListener('click', () => openPaymentModal(btn.dataset.id));
   });
-  if(!rows.length){alert('குறைந்தது ஒரு பொருளையாவது சேர்க்கவும்.');return;}
-  try{await api('POST','/stock-trips',{truckId:Number(truckId),dateISO:document.getElementById('stockDate').value||todayISO(),items:rows,notes:document.getElementById('stockNotes').value.trim()});}
-  catch(e){showErr(e);return;}
-  document.getElementById('stockItemsBody').innerHTML='';document.getElementById('stockNotes').value='';
-  addStockRow();recalcStockTotal();await loadStockTrips();
-  alert('சரக்கு பதிவு சேமிக்கப்பட்டது ✓');
-});
-async function loadStockTrips(){
-  let list;try{list=await api('GET','/stock-trips');}catch(e){showErr(e);return;}
-  const tbody=document.querySelector('#stockTripsTable tbody');tbody.innerHTML='';
-  const recent=[...list].sort((a,b)=>b.createdAt-a.createdAt).slice(0,12);
-  document.getElementById('stockTripsEmpty').style.display=recent.length?'none':'block';
-  recent.forEach(t=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${fmt(t.dateISO)}</td><td>${esc(t.truckNumber)}</td><td>${esc(t.driverName||'—')}</td><td class="items-list-cell">${esc(t.items.map(it=>`${it.name} (${it.qty}${it.unit})`).join(', '))}</td><td>${money(t.totalCost)}</td>`;tbody.appendChild(tr);});
+  tbody.querySelectorAll('.ledger-bill-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      switchTab('newbill');
+      document.getElementById('billCustomerSelect').value = btn.dataset.id;
+      updatePrevBalanceDisplay();
+    });
+  });
 }
-document.getElementById('saveSalaryBtn').addEventListener('click', async()=>{
-  const truckId=document.getElementById('salaryTruckSelect').value;
-  if(!truckId){alert('டிரைவரை தேர்வு செய்யவும்.');return;}
-  const amount=parseFloat(document.getElementById('salaryAmount').value)||0;
-  if(amount<=0){alert('தொகையை சரியாக குறிப்பிடவும்.');return;}
-  try{await api('POST','/salaries',{truckId:Number(truckId),dateISO:document.getElementById('salaryDate').value||todayISO(),amount,notes:document.getElementById('salaryNotes').value.trim()});}
-  catch(e){showErr(e);return;}
-  document.getElementById('salaryAmount').value='';document.getElementById('salaryNotes').value='';
-  await loadSalaries();alert('சம்பளம் பதிவு சேமிக்கப்பட்டது ✓');
+
+document.getElementById('downloadLedgerBtn').addEventListener('click', () => {
+  const dateISO = document.getElementById('ledgerDate').value || todayISO();
+  let csv = 'பெயர்,முதல் பாக்கி,பொருள் எடுக்கது,மொத்தம்,ரூ. கொடுத்தது,பாக்கி\n';
+  [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(c => {
+    const opening = customerOpeningForDate(c, dateISO);
+    const goodsToday = customerBillsOn(c.id, dateISO).reduce((s, b) => s + b.total, 0);
+    const paidToday = customerPaymentsOn(c.id, dateISO).reduce((s, p) => s + p.amount, 0);
+    const total = opening + goodsToday;
+    const closing = total - paidToday;
+    csv += [
+      `"${c.name.replace(/"/g, '""')}"`,
+      plainMoney(opening), plainMoney(goodsToday), plainMoney(total), plainMoney(paidToday), plainMoney(closing)
+    ].join(',') + '\n';
+  });
+  downloadBlob(csv, `daily-ledger_${dateISO}.csv`, 'text/csv;charset=utf-8;');
 });
-async function loadSalaries(){
-  let list;try{list=await api('GET','/salaries');}catch(e){showErr(e);return;}
-  const tbody=document.querySelector('#salaryTable tbody');tbody.innerHTML='';
-  const recent=[...list].sort((a,b)=>b.createdAt-a.createdAt).slice(0,12);
-  document.getElementById('salaryEmpty').style.display=recent.length?'none':'block';
-  recent.forEach(s=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${fmt(s.dateISO)}</td><td>${esc(s.truckNumber||'—')}</td><td>${esc(s.driverName||'—')}</td><td>${money(s.amount)}</td><td>${esc(s.notes||'—')}</td>`;tbody.appendChild(tr);});
+
+/* ============================================================
+   MONTHLY SUMMARY — printable A4 reference sheet
+   ============================================================ */
+function monthBounds(monthStr) { // monthStr = 'YYYY-MM'
+  const [y, m] = monthStr.split('-').map(Number);
+  const first = `${y}-${pad(m)}-01`;
+  const lastDay = new Date(y, m, 0).getDate(); // day 0 of next month = last day of this month
+  const last = `${y}-${pad(m)}-${pad(lastDay)}`;
+  return { first, last };
 }
+function currentMonthStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+}
+(function initMonthlyPicker() {
+  document.getElementById('monthlyMonth').value = currentMonthStr();
+})();
+document.getElementById('monthlyMonth').addEventListener('change', renderMonthlyTab);
+document.getElementById('monthlyThisMonthBtn').addEventListener('click', () => {
+  document.getElementById('monthlyMonth').value = currentMonthStr();
+  renderMonthlyTab();
+});
+
+function computeMonthlyRows(monthStr) {
+  const { first, last } = monthBounds(monthStr);
+  return [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).map(c => {
+    const opening = customerOpeningForDate(c, first); // balance just before month start
+    const goods = bills
+      .filter(b => b.customerId === c.id && b.dateISO >= first && b.dateISO <= last)
+      .reduce((s, b) => s + b.total, 0);
+    const paid = payments
+      .filter(p => p.customerId === c.id && p.dateISO >= first && p.dateISO <= last)
+      .reduce((s, p) => s + p.amount, 0);
+    const billCount = bills.filter(b => b.customerId === c.id && b.dateISO >= first && b.dateISO <= last).length;
+    const closing = opening + goods - paid;
+    return { customer: c, opening, goods, paid, closing, billCount };
+  });
+}
+
+function renderMonthlyTab() {
+  const monthStr = document.getElementById('monthlyMonth').value || currentMonthStr();
+  const [y, m] = monthStr.split('-');
+  document.getElementById('monthlyMonthLabel').textContent = `${monthNameTa(Number(m))} ${y}`;
+
+  const rows = computeMonthlyRows(monthStr);
+  document.getElementById('monthlyEmpty').style.display = rows.length ? 'none' : 'block';
+
+  const tbody = document.querySelector('#monthlyTable tbody');
+  tbody.innerHTML = '';
+  let sO = 0, sG = 0, sP = 0, sC = 0, totalBills = 0;
+  rows.forEach(r => {
+    sO += r.opening; sG += r.goods; sP += r.paid; sC += r.closing; totalBills += r.billCount;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(r.customer.name)}</td>
+      <td class="num">${plainMoney(r.opening)}</td>
+      <td class="num">${r.goods ? plainMoney(r.goods) : '—'}</td>
+      <td class="num">${r.paid ? plainMoney(r.paid) : '—'}</td>
+      <td class="num strong">${plainMoney(r.closing)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('monthlySumOpening').textContent = plainMoney(sO);
+  document.getElementById('monthlySumGoods').textContent = plainMoney(sG);
+  document.getElementById('monthlySumPaid').textContent = plainMoney(sP);
+  document.getElementById('monthlySumClosing').textContent = plainMoney(sC);
+
+  document.getElementById('monthlyStatSales').textContent = money(sG);
+  document.getElementById('monthlyStatBills').textContent = `${totalBills} பில்கள்`;
+  document.getElementById('monthlyStatPaid').textContent = money(sP);
+  document.getElementById('monthlyStatClosing').textContent = money(sC);
+}
+
+function monthNameTa(m) {
+  const names = ['', 'ஜனவரி', 'பிப்ரவரி', 'மார்ச்', 'ஏப்ரல்', 'மே', 'ஜூன்', 'ஜூலை', 'ஆகஸ்ட்', 'செப்டம்பர்', 'அக்டோபர்', 'நவம்பர்', 'டிசம்பர்'];
+  return names[m] || '';
+}
+
+document.getElementById('downloadMonthlyBtn').addEventListener('click', () => {
+  const monthStr = document.getElementById('monthlyMonth').value || currentMonthStr();
+  const rows = computeMonthlyRows(monthStr);
+  let csv = 'பெயர்,மாத தொடக்க பாக்கி,இம்மாத விற்பனை,இம்மாத வரவு,மாத இறுதி பாக்கி\n';
+  rows.forEach(r => {
+    csv += [
+      `"${r.customer.name.replace(/"/g, '""')}"`,
+      plainMoney(r.opening), plainMoney(r.goods), plainMoney(r.paid), plainMoney(r.closing)
+    ].join(',') + '\n';
+  });
+  downloadBlob(csv, `monthly-summary_${monthStr}.csv`, 'text/csv;charset=utf-8;');
+});
+
+document.getElementById('printMonthlyBtn').addEventListener('click', () => {
+  const monthStr = document.getElementById('monthlyMonth').value || currentMonthStr();
+  const [y, m] = monthStr.split('-');
+  const rows = computeMonthlyRows(monthStr);
+
+  let sO = 0, sG = 0, sP = 0, sC = 0;
+  const bodyRows = rows.map(r => {
+    sO += r.opening; sG += r.goods; sP += r.paid; sC += r.closing;
+    return `
+      <tr>
+        <td>${escapeHtml(r.customer.name)}</td>
+        <td class="num">${plainMoney(r.opening)}</td>
+        <td class="num">${r.goods ? plainMoney(r.goods) : '-'}</td>
+        <td class="num">${r.paid ? plainMoney(r.paid) : '-'}</td>
+        <td class="num">${plainMoney(r.closing)}</td>
+      </tr>`;
+  }).join('');
+
+  const now = new Date();
+  document.getElementById('monthlyPrintArea').innerHTML = `
+    <div class="print-sheet">
+      <div class="print-sheet-head">
+        ${shop.tagline ? `<div style="font-size:11px;">${escapeHtml(shop.tagline)}</div>` : ''}
+        <div class="print-sheet-logo">${escapeHtml(shop.name)}<span class="mid">${escapeHtml(shop.nameMid || '')}</span></div>
+        <div class="print-sheet-bottom">${escapeHtml(shop.nameBottom || '')}</div>
+        <div class="print-sheet-sub">${escapeHtml(shop.sub)} — ${escapeHtml(shop.address)} — Cell: ${escapeHtml(shop.phone)}</div>
+      </div>
+      <div class="print-sheet-title">மாத சுருக்கம் — ${monthNameTa(Number(m))} ${y}</div>
+      <table>
+        <thead>
+          <tr>
+            <th>பெயர்</th>
+            <th class="num">மாத தொடக்க பாக்கி</th>
+            <th class="num">இம்மாத விற்பனை</th>
+            <th class="num">இம்மாத வரவு</th>
+            <th class="num">மாத இறுதி பாக்கி</th>
+          </tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+        <tfoot>
+          <tr>
+            <td>மொத்தம்</td>
+            <td class="num">${plainMoney(sO)}</td>
+            <td class="num">${plainMoney(sG)}</td>
+            <td class="num">${plainMoney(sP)}</td>
+            <td class="num">${plainMoney(sC)}</td>
+          </tr>
+        </tfoot>
+      </table>
+      <div class="print-sheet-foot">அச்சிடப்பட்ட தேதி: ${formatDateDisplay(todayISO())} ${formatTimeDisplay(now)}</div>
+    </div>
+  `;
+  document.body.classList.add('printing-monthly');
+  window.print();
+});
+window.addEventListener('afterprint', () => {
+  document.body.classList.remove('printing-monthly');
+});
+
+/* ============================================================
+   DATA CLEANUP — purge old bills/payments, keep balances correct
+   ============================================================ */
+(function initCleanupDate() {
+  const d = new Date();
+  const firstOfMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+  document.getElementById('cleanupCutoffDate').value = firstOfMonth;
+  updateCleanupInfo();
+})();
+document.getElementById('cleanupCutoffDate').addEventListener('change', updateCleanupInfo);
+
+function updateCleanupInfo() {
+  const cutoff = document.getElementById('cleanupCutoffDate').value;
+  const info = document.getElementById('cleanupInfo');
+  if (!cutoff) { info.textContent = ''; return; }
+  const billCount = bills.filter(b => b.dateISO < cutoff).length;
+  const payCount = payments.filter(p => p.dateISO < cutoff).length;
+  info.textContent = `${formatDateDisplay(cutoff)} -க்கு முன் உள்ள ${billCount} பில்கள் மற்றும் ${payCount} பணம் பெற்ற பதிவுகள் நீக்கப்படும்.`;
+}
+
+document.getElementById('cleanupBtn').addEventListener('click', async () => {
+  const cutoff = document.getElementById('cleanupCutoffDate').value;
+  if (!cutoff) { alert('தேதியை தேர்வு செய்யவும்.'); return; }
+
+  const billCount = bills.filter(b => b.dateISO < cutoff).length;
+  const payCount = payments.filter(p => p.dateISO < cutoff).length;
+  if (billCount === 0 && payCount === 0) {
+    alert('இந்த தேதிக்கு முன் நீக்க எந்த தரவும் இல்லை.');
+    return;
+  }
+  if (!confirm(`${formatDateDisplay(cutoff)} -க்கு முன் உள்ள ${billCount} பில்கள் மற்றும் ${payCount} பணம் பதிவுகள் நிரந்தரமாக நீக்கப்படும். ஒவ்வொரு வாடிக்கையாளரின் பாக்கி தொகை மாறாது. தொடரவா?`)) return;
+
+  const btn = document.getElementById('cleanupBtn');
+  btn.disabled = true;
+  try {
+    // Safety backup first, always.
+    const backupData = { shop, items, customers, bills, payments, exportedAt: new Date().toISOString() };
+    downloadBlob(JSON.stringify(backupData, null, 2), `sri-km-vegetables-backup-before-cleanup_${todayISO()}.json`, 'application/json');
+
+    // Roll each customer's openingBalance forward to absorb everything before cutoff,
+    // so their current/future balance stays exactly the same after we delete the rows.
+    const dayBefore = (() => {
+      const d = new Date(cutoff);
+      d.setDate(d.getDate() - 1);
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    })();
+    customers.forEach(c => {
+      c.openingBalance = customerBalanceAsOf(c, dayBefore);
+    });
+    await DB.bulkUpdateOpeningBalances(customers);
+
+    await DB.deleteBillsBefore(cutoff);
+    await DB.deletePaymentsBefore(cutoff);
+    bills = bills.filter(b => b.dateISO >= cutoff);
+    payments = payments.filter(p => p.dateISO >= cutoff);
+
+    alert(`நீக்கப்பட்டது. ஒரு backup பைல் தானாக பதிவிறக்கப்பட்டுள்ளது — அதை பாதுகாப்பாக வைத்துக் கொள்ளுங்கள்.`);
+    updateCleanupInfo();
+    renderDashboard();
+    renderCustomersTab();
+  } catch (err) {
+    alert('நீக்குவதில் பிழை — இணையம் இணைப்பை சரிபார்த்து மீண்டும் முயற்சிக்கவும். மேலே பதிவிறக்கிய backup பைல் பாதுகாப்பாக உள்ளது.');
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 /* ============================================================
    REPORTS TAB
    ============================================================ */
-async function renderReportsTab(){
-  try{customers=await api('GET','/customers');}catch(e){showErr(e);return;}
-  // Populate customer filter in bill selection panel
-  const cf=document.getElementById('selectCustomerFilter');
-  const cfCur=cf.value;
-  cf.innerHTML='<option value="">எல்லா வாடிக்கையாளர்</option>';
-  [...customers].sort((a,b)=>a.name.localeCompare(b.name,'ta')).forEach(c=>{
-    const o=document.createElement('option');o.value=c.id;o.textContent=c.name;cf.appendChild(o);
-  });
-  if(customers.some(c=>String(c.id)===cfCur)) cf.value=cfCur;
-}
+let lastReportRows = [];
 
-/* ---- Date defaults ---- */
-(()=>{
-  const to=todayISO(),fd=new Date();fd.setDate(fd.getDate()-30);
-  const from=`${fd.getFullYear()}-${pad(fd.getMonth()+1)}-${pad(fd.getDate())}`;
-  document.getElementById('reportFrom').value=from;
-  document.getElementById('reportTo').value=to;
-  document.getElementById('selectFrom').value=from;
-  document.getElementById('selectTo').value=to;
+(function initReportDates() {
+  const to = todayISO();
+  const fromDate = new Date();
+  fromDate.setDate(fromDate.getDate() - 30);
+  const from = fromDate.getFullYear() + '-' + pad(fromDate.getMonth() + 1) + '-' + pad(fromDate.getDate());
+  document.getElementById('reportFrom').value = from;
+  document.getElementById('reportTo').value = to;
 })();
 
-/* ============================================================
-   BILL SELECTION & THERMAL BULK PRINT
-   ============================================================ */
-document.getElementById('loadSelectBillsBtn').addEventListener('click', async()=>{
-  const from=document.getElementById('selectFrom').value;
-  const to  =document.getElementById('selectTo').value;
-  const custId=document.getElementById('selectCustomerFilter').value;
-  if(!from||!to){alert('தேதி வரம்பை தேர்வு செய்யவும்.');return;}
+document.getElementById('runReportBtn').addEventListener('click', runReport);
 
-  let bills; try{bills=await api('GET',`/bills?from=${from}&to=${to}`);}catch(e){showErr(e);return;}
-  if(custId) bills=bills.filter(b=>String(b.customerId)===custId);
-  selectableBills=bills;
+function runReport() {
+  const from = document.getElementById('reportFrom').value;
+  const to = document.getElementById('reportTo').value;
+  if (!from || !to) { alert('தேதி வரம்பை தேர்வு செய்யவும்.'); return; }
 
-  const tbody=document.getElementById('selectBillsBody');
-  tbody.innerHTML='';
-  document.getElementById('selectBillsEmpty').style.display=bills.length?'none':'block';
-  document.getElementById('selectCountBar').style.display=bills.length?'flex':'none';
+  const filtered = bills.filter(b => b.dateISO >= from && b.dateISO <= to)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  lastReportRows = filtered;
 
-  bills.forEach(b=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`
-      <td class="chk-col"><input type="checkbox" class="bill-chk" data-id="${b.id}" checked></td>
+  const tbody = document.querySelector('#reportTable tbody');
+  tbody.innerHTML = '';
+  document.getElementById('reportEmpty').style.display = filtered.length ? 'none' : 'block';
+
+  let totalSales = 0;
+  filtered.forEach(b => {
+    totalSales += b.total;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
       <td>${b.billNo}</td>
-      <td>${fmt(b.dateISO)}</td>
-      <td>${b.timeDisplay||''}</td>
-      <td>${esc(b.customerName)}</td>
+      <td>${formatDateDisplay(b.dateISO)}</td>
+      <td>${b.timeDisplay}</td>
+      <td>${escapeHtml(b.customerName)}</td>
       <td>${money(b.total)}</td>
-      <td>${b.vehicleRent>0?money(b.vehicleRent):'—'}</td>
-      <td>${money(b.grandTotal)}</td>`;
+      <td>${money(b.grandTotal)}</td>
+      <td><button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button></td>
+    `;
     tbody.appendChild(tr);
   });
+  tbody.querySelectorAll('.view-bill-btn').forEach(btn => {
+    btn.addEventListener('click', () => openPrintModal(bills.find(b => b.id === btn.dataset.id)));
+  });
 
-  tbody.querySelectorAll('.bill-chk').forEach(chk=>chk.addEventListener('change',updateSelectCount));
-  updateSelectCount();
-});
-
-function updateSelectCount(){
-  const all=document.querySelectorAll('#selectBillsBody .bill-chk');
-  const checked=document.querySelectorAll('#selectBillsBody .bill-chk:checked');
-  document.getElementById('selectedCount').textContent=checked.length;
-  document.getElementById('printSelectedBtn').disabled=checked.length===0;
-  document.getElementById('selectAllChk').checked=all.length>0&&all.length===checked.length;
+  document.getElementById('reportStats').style.display = 'grid';
+  document.getElementById('reportBillCount').textContent = filtered.length;
+  document.getElementById('reportTotalSales').textContent = money(totalSales);
+  document.getElementById('reportAvgBill').textContent = money(filtered.length ? totalSales / filtered.length : 0);
 }
 
-document.getElementById('selectAllChk').addEventListener('change',function(){
-  document.querySelectorAll('#selectBillsBody .bill-chk').forEach(chk=>chk.checked=this.checked);
-  updateSelectCount();
-});
-document.getElementById('selectAllBtn').addEventListener('click',()=>{
-  document.querySelectorAll('#selectBillsBody .bill-chk').forEach(chk=>chk.checked=true);
-  updateSelectCount();
-});
-document.getElementById('deselectAllBtn').addEventListener('click',()=>{
-  document.querySelectorAll('#selectBillsBody .bill-chk').forEach(chk=>chk.checked=false);
-  updateSelectCount();
-});
-
-document.getElementById('printSelectedBtn').addEventListener('click', async()=>{
-  const selectedIds=new Set(
-    [...document.querySelectorAll('#selectBillsBody .bill-chk:checked')].map(chk=>Number(chk.dataset.id))
-  );
-  if(!selectedIds.size){alert('ஒரு பில் கூட தேர்வு செய்யப்படவில்லை.');return;}
-
-  // Fetch full bill data for each selected bill
-  const selected=selectableBills.filter(b=>selectedIds.has(b.id));
-
-  // Build thermal HTML for all selected bills
-  const area=document.getElementById('thermalPrintArea');
-  area.innerHTML=selected.map(b=>buildThermalBill(b)).join('');
-
-  // Print
-  window.print();
-
-  // Clean up after print dialog closes
-  setTimeout(()=>{area.innerHTML='';},2000);
-});
-
-/* ============================================================
-   SUMMARY REPORTS
-   ============================================================ */
-document.getElementById('runReportBtn').addEventListener('click', async()=>{
-  const from=document.getElementById('reportFrom').value,to=document.getElementById('reportTo').value;
-  if(!from||!to){alert('தேதி வரம்பை தேர்வு செய்யவும்.');return;}
-  let bills,stockTrips,salaries;
-  try{[bills,stockTrips,salaries]=await Promise.all([
-    api('GET',`/bills?from=${from}&to=${to}`),
-    api('GET',`/stock-trips?from=${from}&to=${to}`),
-    api('GET',`/salaries?from=${from}&to=${to}`)
-  ]);}catch(e){showErr(e);return;}
-  lastReport={bills,stockTrips,salaries,from,to};
-  document.getElementById('reportEmptyAll').style.display='none';
-  document.getElementById('reportStats').style.display='grid';
-  [document.getElementById('reportSalesPanel'),
-   document.getElementById('reportStockPanel'),
-   document.getElementById('reportSalaryPanel')].forEach(el=>el.style.display='');
-
-  const totalSales=bills.reduce((s,b)=>s+b.total,0);
-  document.getElementById('reportBillCount').textContent=bills.length;
-  document.getElementById('reportTotalSales').textContent=money(totalSales);
-  document.getElementById('reportAvgBill').textContent=money(bills.length?totalSales/bills.length:0);
-  document.getElementById('reportTotalPurchases').textContent=money(stockTrips.reduce((s,t)=>s+t.totalCost,0));
-  document.getElementById('reportTotalSalaries').textContent=money(salaries.reduce((s,x)=>s+x.amount,0));
-
-  const stb=document.querySelector('#reportSalesTable tbody');stb.innerHTML='';
-  document.getElementById('reportSalesEmpty').style.display=bills.length?'none':'block';
-  bills.forEach(b=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${b.billNo}</td><td>${fmt(b.dateISO)}</td><td>${b.timeDisplay}</td>
-      <td>${esc(b.customerName)}</td><td>${money(b.total)}</td>
-      <td>${b.vehicleRent>0?money(b.vehicleRent):'—'}</td><td>${money(b.grandTotal)}</td>
-      <td><button class="btn btn-ghost vb" data-id="${b.id}">🖨</button></td>`;
-    stb.appendChild(tr);
+document.getElementById('downloadReportBtn').addEventListener('click', () => {
+  if (lastReportRows.length === 0) {
+    if (!confirm('அறிக்கையில் பில் எதுவும் இல்லை. இப்போதே உருவாக்கவா?')) return;
+    runReport();
+    if (lastReportRows.length === 0) return;
+  }
+  let csv = 'பில் எண்,தேதி,நேரம்,வாடிக்கையாளர்,பொருட்கள்,இன்றைய தொகை,முன் பாக்கி,மொத்தம்\n';
+  lastReportRows.forEach(b => {
+    const itemsStr = b.items.map(it => `${it.name} (${it.qty} ${it.unit} x ${it.price})`).join(' | ');
+    csv += [
+      b.billNo,
+      formatDateDisplay(b.dateISO),
+      b.timeDisplay,
+      `"${b.customerName.replace(/"/g, '""')}"`,
+      `"${itemsStr.replace(/"/g, '""')}"`,
+      plainMoney(b.total),
+      plainMoney(b.prevBalance),
+      plainMoney(b.grandTotal)
+    ].join(',') + '\n';
   });
-  stb.querySelectorAll('.vb').forEach(btn=>btn.addEventListener('click',()=>openPrintById(btn.dataset.id)));
-
-  const sktb=document.querySelector('#reportStockTable tbody');sktb.innerHTML='';
-  document.getElementById('reportStockEmpty').style.display=stockTrips.length?'none':'block';
-  stockTrips.forEach(t=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${fmt(t.dateISO)}</td><td>${esc(t.truckNumber)}</td><td>${esc(t.driverName||'—')}</td><td class="items-list-cell">${esc(t.items.map(it=>`${it.name} ${it.qty}${it.unit}`).join(', '))}</td><td>${money(t.totalCost)}</td>`;sktb.appendChild(tr);});
-  const saltb=document.querySelector('#reportSalaryTable tbody');saltb.innerHTML='';
-  document.getElementById('reportSalaryEmpty').style.display=salaries.length?'none':'block';
-  salaries.forEach(s=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${fmt(s.dateISO)}</td><td>${esc(s.truckNumber||'—')}</td><td>${esc(s.driverName||'—')}</td><td>${money(s.amount)}</td><td>${esc(s.notes||'—')}</td>`;saltb.appendChild(tr);});
+  const from = document.getElementById('reportFrom').value;
+  const to = document.getElementById('reportTo').value;
+  downloadBlob(csv, `sales-report_${from}_to_${to}.csv`, 'text/csv;charset=utf-8;');
 });
 
-document.getElementById('downloadSalesBtn').addEventListener('click',()=>{
-  const{bills,from,to}=lastReport;if(!bills.length){alert('அறிக்கையில் பில் இல்லை.');return;}
-  let csv='பில் எண்,தேதி,நேரம்,வாடிக்கையாளர்,இன்றைய தொகை,வண்டி வாடகை,முன் பாக்கி,மொத்தம்\n';
-  bills.forEach(b=>csv+=`${b.billNo},${fmt(b.dateISO)},${b.timeDisplay},"${b.customerName.replace(/"/g,'""')}",${plain(b.total)},${plain(b.vehicleRent||0)},${plain(b.prevBalance)},${plain(b.grandTotal)}\n`);
-  dlCSV(csv,`sales_${from}_to_${to}.csv`);
-});
-document.getElementById('downloadStockBtn').addEventListener('click',()=>{
-  const{stockTrips,from,to}=lastReport;if(!stockTrips.length){alert('சரக்கு பதிவு இல்லை.');return;}
-  let csv='தேதி,டிரக்,டிரைவர்,பொருட்கள்,மொத்தம்\n';
-  stockTrips.forEach(t=>{csv+=`${fmt(t.dateISO)},${t.truckNumber||''},"${t.driverName||''}","${t.items.map(it=>`${it.name} ${it.qty}${it.unit}`).join(' | ')}",${plain(t.totalCost)}\n`;});
-  dlCSV(csv,`stock_${from}_to_${to}.csv`);
-});
-document.getElementById('downloadSalaryBtn').addEventListener('click',()=>{
-  const{salaries,from,to}=lastReport;if(!salaries.length){alert('சம்பள பதிவு இல்லை.');return;}
-  let csv='தேதி,டிரக்,டிரைவர்,தொகை,குறிப்பு\n';
-  salaries.forEach(s=>csv+=`${fmt(s.dateISO)},${s.truckNumber||''},${s.driverName||''},${plain(s.amount)},"${(s.notes||'').replace(/"/g,'""')}"\n`);
-  dlCSV(csv,`salaries_${from}_to_${to}.csv`);
-});
+function downloadBlob(content, filename, mime) {
+  const blob = new Blob(['\uFEFF' + content], { type: mime }); // BOM for Excel Tamil support
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 /* ============================================================
    SETTINGS TAB
    ============================================================ */
-async function renderSettingsTab(){
-  try{shop=await api('GET','/shop');}catch(e){showErr(e);return;}
-  document.getElementById('setShopName').value   =shop.name||'';
-  document.getElementById('setShopSub').value    =shop.sub||'';
-  document.getElementById('setShopAddress').value=shop.address||'';
-  document.getElementById('setShopPhone').value  =shop.phone||'';
-  document.getElementById('setOwnerName').value  =shop.owner||'';
-  document.getElementById('setNextBillNo').value =shop.nextBillNo||1;
+function renderSettingsTab() {
+  document.getElementById('setShopTagline').value = shop.tagline || '';
+  document.getElementById('setShopName').value = shop.name;
+  document.getElementById('setShopNameMid').value = shop.nameMid || '';
+  document.getElementById('setShopNameBottom').value = shop.nameBottom || '';
+  document.getElementById('setShopSub').value = shop.sub;
+  document.getElementById('setShopAddress').value = shop.address;
+  document.getElementById('setShopPhone').value = shop.phone;
+  document.getElementById('setNextBillNo').value = shop.nextBillNo;
 }
-document.getElementById('saveSettingsBtn').addEventListener('click', async()=>{
-  const patch={
-    name:document.getElementById('setShopName').value.trim()||shop.name,
-    sub:document.getElementById('setShopSub').value.trim(),
-    address:document.getElementById('setShopAddress').value.trim(),
-    phone:document.getElementById('setShopPhone').value.trim(),
-    owner:document.getElementById('setOwnerName').value.trim(),
-    nextBillNo:parseInt(document.getElementById('setNextBillNo').value,10)||shop.nextBillNo
+
+document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+  shop.tagline = document.getElementById('setShopTagline').value.trim();
+  shop.name = document.getElementById('setShopName').value.trim() || shop.name;
+  shop.nameMid = document.getElementById('setShopNameMid').value.trim();
+  shop.nameBottom = document.getElementById('setShopNameBottom').value.trim();
+  shop.sub = document.getElementById('setShopSub').value.trim();
+  shop.address = document.getElementById('setShopAddress').value.trim();
+  shop.phone = document.getElementById('setShopPhone').value.trim();
+  shop.nextBillNo = parseInt(document.getElementById('setNextBillNo').value, 10) || shop.nextBillNo;
+  const btn = document.getElementById('saveSettingsBtn');
+  btn.disabled = true;
+  try {
+    await DB.saveShop(shop);
+    document.getElementById('brandShopName').textContent = shopFullName();
+    const conf = document.getElementById('settingsSaved');
+    conf.classList.add('show');
+    setTimeout(() => conf.classList.remove('show'), 2000);
+  } catch (err) {
+    alert('அமைப்புகளை சேமிக்க முடியவில்லை.'); console.error(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---------------- Backup / Restore ---------------- */
+document.getElementById('exportDataBtn').addEventListener('click', () => {
+  const data = {
+    shop, items, customers, bills, payments,
+    exportedAt: new Date().toISOString()
   };
-  try{shop=await api('PUT','/shop',patch);}catch(e){showErr(e);return;}
-  document.getElementById('brandShopName').textContent=shop.name;
-  const c=document.getElementById('settingsSaved');c.classList.add('show');setTimeout(()=>c.classList.remove('show'),2200);
+  downloadBlob(JSON.stringify(data, null, 2), `sri-km-vegetables-backup_${todayISO()}.json`, 'application/json');
 });
-document.getElementById('exportDataBtn').addEventListener('click', async()=>{
-  try{const d=await api('GET','/export');dlJSON(d,`veggie-backup_${todayISO()}.json`);}catch(e){showErr(e);}
-});
-document.getElementById('importDataInput').addEventListener('change', async(e)=>{
-  const file=e.target.files[0];if(!file) return;
-  const reader=new FileReader();
-  reader.onload=async()=>{
-    try{
-      const data=JSON.parse(reader.result);
-      if(!confirm('இப்போதைய தரவு மாற்றப்படும். தொடரவா?')) return;
-      await api('POST','/import',data);
+
+document.getElementById('importDataInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (!confirm('இப்போதைய தரவு அனைத்தும் நீக்கப்பட்டு, இந்த பைலில் இருக்கும் தரவு Supabase-க்கு ஏற்றப்படும். இதற்கு சிறிது நேரம் ஆகலாம். தொடரவா?')) return;
+      await DB.restoreAll(data);
+      const fresh = await DB.fetchAll();
+      shop = fresh.shop || shop;
+      items = fresh.items;
+      customers = fresh.customers;
+      bills = fresh.bills;
+      payments = fresh.payments;
       alert('தரவு வெற்றிகரமாக மீட்டமைக்கப்பட்டது.');
-      [shop,items,customers,trucks]=await Promise.all([api('GET','/shop'),api('GET','/items'),api('GET','/customers'),api('GET','/trucks')]);
-      await renderDashboard();switchTab('dashboard');
-    }catch(err){alert('பைலை படிக்க முடியவில்லை.');}
+      renderDashboard();
+      switchTab('dashboard');
+    } catch (err) {
+      alert('இந்த பைலை ஏற்ற முடியவில்லை. சரியான backup JSON பைலை தேர்வு செய்யவும்.');
+      console.error(err);
+    }
   };
-  reader.readAsText(file);e.target.value='';
+  reader.readAsText(file);
+  e.target.value = '';
 });
 
 /* ============================================================
-   THERMAL RECEIPT BUILDER
-   Matches the exact format in the sample photo:
-   shop header → bill meta → item table → totals
+   PRINT / RECEIPT MODAL
    ============================================================ */
-function buildThermalBill(b){
-  const itemRows=b.items.map(it=>`
-    <tr>
-      <td class="item-name">${esc(it.name)}</td>
-      <td class="r">${it.qty}</td>
-      <td class="r">${plain(it.price)}</td>
-      <td class="r">${plain(it.value)}</td>
-    </tr>`).join('');
+const printModal = document.getElementById('printModal');
+let currentPrintBill = null;
 
-  const vrRow=b.vehicleRent>0?`
-    <div class="th-total-row">
-      <span>வண்டி வாடகை</span><span class="r">${plain(b.vehicleRent)}</span>
-    </div>`:'';
-
-  return `
-  <div class="thermal-bill">
-    <div class="th-center">
-      <div class="th-shop-name">${esc(shop.name||'')}</div>
-      <div class="th-shop-sub">${esc(shop.sub||'')}</div>
-      ${shop.address?`<div class="th-shop-info">${esc(shop.address)}</div>`:''}
-      <div class="th-shop-info">CELL: ${esc(shop.phone||'')}</div>
-      <div class="th-shop-info">உரிமை : ${esc(shop.owner||'')}</div>
-    </div>
-    <hr class="th-dash">
-    <div class="th-meta"><span>Bill No. : ${b.billNo}</span><span>Date : ${fmt(b.dateISO)}</span></div>
-    <div class="th-meta"><span>To : ${esc(b.customerName)}</span><span>Time : ${b.timeDisplay||''}</span></div>
-    <hr class="th-dash">
-    <table class="th-table">
-      <thead><tr><th>பொருள்</th><th class="r">அளவு</th><th class="r">விலை</th><th class="r">மதிப்பு</th></tr></thead>
-      <tbody>${itemRows}</tbody>
-    </table>
-    <hr class="th-dash">
-    <div class="th-totals">
-      <div class="th-total-row bold">
-        <span>மொத்த தொகை</span><span class="r">${plain(b.total)}</span>
-      </div>
-    </div>
-    <hr class="th-dash">
-    <div class="th-totals">
-      <div class="th-total-row"><span>முன் பாக்கி</span><span class="r">${plain(b.prevBalance)}</span></div>
-      ${vrRow}
-      <div class="th-grand">
-        <div class="th-total-row bold"><span>மொத்தம்</span><span class="r">${plain(b.grandTotal)}</span></div>
-      </div>
-    </div>
-    <div class="th-foot">நன்றி! மீண்டும் வரவும்.</div>
-  </div>`;
-}
-
-/* ============================================================
-   SINGLE BILL PRINT MODAL
-   ============================================================ */
-const printModal=document.getElementById('printModal');
-
-async function openPrintById(id){
-  try{openPrintModal(await api('GET','/bills/'+id));}catch(e){showErr(e);}
-}
-function openPrintModal(bill){
-  if(!bill) return;
-  currentPrintBill=bill;
-  // Use the same thermal template for the preview
-  document.getElementById('billPrintArea').innerHTML=buildThermalBill(bill);
+function openPrintModal(bill) {
+  if (!bill) return;
+  currentPrintBill = bill;
+  document.getElementById('billPrintArea').innerHTML = buildReceiptHTML(bill);
   printModal.classList.remove('hidden');
 }
-document.getElementById('closePrintBtn').addEventListener('click',()=>{
-  printModal.classList.add('hidden');currentPrintBill=null;
-});
-document.getElementById('printBtn').addEventListener('click',()=>{
-  // For single bill print: put it in thermalPrintArea so @media print picks it up correctly
-  const area=document.getElementById('thermalPrintArea');
-  area.innerHTML=buildThermalBill(currentPrintBill);
-  printModal.classList.add('hidden');  // hide modal so it doesn't interfere
-  window.print();
-  setTimeout(()=>{area.innerHTML='';printModal.classList.add('hidden');},2000);
+document.getElementById('closePrintBtn').addEventListener('click', () => {
+  printModal.classList.add('hidden');
+  currentPrintBill = null;
 });
 
-/* ---- WhatsApp ---- */
-document.getElementById('whatsappBtn').addEventListener('click',()=>{
-  if(!currentPrintBill) return;
-  const b=currentPrintBill;
-  let msg=`*${shop.name}*\n${shop.sub||''}\nCELL: ${shop.phone||''}\n\n`;
-  msg+=`Bill No: ${b.billNo} | Date: ${fmt(b.dateISO)} | Time: ${b.timeDisplay||''}\n`;
-  msg+=`To: ${b.customerName}\n`;
-  msg+=`${'─'.repeat(32)}\n`;
-  b.items.forEach(it=>msg+=`${it.name.padEnd(16)} ${String(it.qty).padStart(4)} × ${plain(it.price).padStart(7)} = ${plain(it.value).padStart(8)}\n`);
-  msg+=`${'─'.repeat(32)}\n`;
-  msg+=`*மொத்த தொகை : ₹${plain(b.total)}*\n`;
-  msg+=`${'─'.repeat(32)}\n`;
-  msg+=`முன் பாக்கி  : ₹${plain(b.prevBalance)}\n`;
-  if(b.vehicleRent>0) msg+=`வண்டி வாடகை : ₹${plain(b.vehicleRent)}\n`;
-  msg+=`*மொத்தம்     : ₹${plain(b.grandTotal)}*\n\n`;
-  msg+=`நன்றி! — ${shop.name}`;
-  const ph=(b.customerPhone||'').replace(/[^0-9]/g,'');
-  window.open(ph?`https://wa.me/${ph}?text=${encodeURIComponent(msg)}`:`https://wa.me/?text=${encodeURIComponent(msg)}`,'_blank');
+function buildReceiptHTML(b) {
+  const itemRows = b.items.map(it => `
+    <tr>
+      <td>${escapeHtml(it.name)}</td>
+      <td class="num">${it.qty}</td>
+      <td class="num">${plainMoney(it.price)}</td>
+      <td class="num">${plainMoney(it.value)}</td>
+    </tr>
+  `).join('');
+
+  return `
+    <div class="receipt-letterhead">
+      <img src="assets/logo.png" alt="${escapeHtml(shopFullName())}" class="receipt-logo-img">
+    </div>
+    <div class="receipt-meta" style="margin-top:8px;">
+      <span>Bill No. : ${b.billNo}</span>
+      <span>Date : ${formatDateDisplay(b.dateISO)}</span>
+    </div>
+    <div class="receipt-meta">
+      <span>To : ${escapeHtml(b.customerName)}</span>
+      <span>Time : ${b.timeDisplay}</span>
+    </div>
+    <div class="receipt-line"></div>
+    <table class="receipt-table">
+      <thead>
+        <tr><th>பொருள்</th><th class="num">அளவு</th><th class="num">விலை</th><th class="num">மதிப்பு</th></tr>
+      </thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <div class="receipt-line"></div>
+    <div class="receipt-totals">
+      <div class="totals-row grand">
+        <span>மொத்த தொகை</span><strong>${plainMoney(b.total)}</strong>
+      </div>
+    </div>
+    <div class="receipt-line"></div>
+    <div class="receipt-totals">
+      <div class="totals-row"><span>முன் பாக்கி</span><strong>${plainMoney(b.prevBalance)}</strong></div>
+      <div class="totals-row grand"><span>மொத்தம்</span><strong>${plainMoney(b.grandTotal)}</strong></div>
+    </div>
+    <div class="receipt-foot">நன்றி! மீண்டும் வரவும்.</div>
+  `;
+}
+
+/* ---------------- Save Bill (as image) & Share ----------------
+   Renders #billPrintArea to a PNG using html2canvas, sized for a
+   3-inch (80mm) thermal printer roll. "Share" opens the native
+   Android/iOS share sheet (Web Share API) so he can pick RawBT,
+   WhatsApp, Bluetooth, or whatever printer app is installed;
+   "Save Bill" just downloads the same image to Photos/Downloads. */
+async function renderBillToBlob() {
+  const el = document.getElementById('billPrintArea');
+  const canvas = await html2canvas(el, {
+    backgroundColor: '#ffffff',
+    scale: 2,
+    useCORS: true
+  });
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+document.getElementById('downloadBillImgBtn').addEventListener('click', async () => {
+  if (!currentPrintBill) return;
+  const btn = document.getElementById('downloadBillImgBtn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const blob = await renderBillToBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bill_${currentPrintBill.billNo}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('பில்லை சேமிக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+});
+
+document.getElementById('shareBillBtn').addEventListener('click', async () => {
+  if (!currentPrintBill) return;
+  const b = currentPrintBill;
+  const btn = document.getElementById('shareBillBtn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const blob = await renderBillToBlob();
+    const file = new File([blob], `bill_${b.billNo}.png`, { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: `பில் #${b.billNo} - ${shopFullName()}`,
+        text: `${b.customerName} — ₹${plainMoney(b.grandTotal)}`
+      });
+    } else {
+      // Desktop / older browsers without file-share support: download the
+      // image instead so he can still attach it manually to WhatsApp/printer app.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bill_${b.billNo}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      alert('இந்த பிரவுசரில் நேரடி Share கிடைக்கவில்லை — பில் படமாக பதிவிறக்கப்பட்டது. அதை WhatsApp / பிரிண்டர் ஆப்-ல் இணைக்கவும்.');
+    }
+  } catch (err) {
+    if (err && err.name !== 'AbortError') alert('பகிர முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 });
 
 /* ============================================================
-   INIT
+   AUTH / BOOT — shop PIN gate backed by Supabase Auth
    ============================================================ */
-(async()=>{
-  try{
-    [shop,items,customers,trucks]=await Promise.all([
-      api('GET','/shop'),api('GET','/items'),api('GET','/customers'),api('GET','/trucks')
-    ]);
-    if(shop.name) document.getElementById('brandShopName').textContent=shop.name;
-  }catch(e){console.error(e);}
-  await renderDashboard();
+const loginGate = document.getElementById('loginGate');
+const loginForm = document.getElementById('loginForm');
+const loginPinInput = document.getElementById('loginPin');
+const loginError = document.getElementById('loginError');
+const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+const appShell = document.getElementById('appShell');
+
+async function loadAllDataAndRender() {
+  const data = await DB.fetchAll();
+  shop = data.shop || { ...DEFAULT_SHOP };
+  items = data.items;
+  customers = data.customers;
+  bills = data.bills;
+  payments = data.payments;
+  document.getElementById('brandShopName').textContent = shopFullName();
+  renderDashboard();
+  renderNewBillTab();
+}
+
+async function showApp() {
+  loginGate.classList.add('hidden');
+  appShell.classList.remove('hidden');
+  try {
+    await loadAllDataAndRender();
+  } catch (err) {
+    console.error(err);
+    alert('தரவை ஏற்ற முடியவில்லை. இணையம் இணைப்பை சரிபார்த்து பக்கத்தை மீண்டும் ஏற்றவும் (Refresh).');
+  }
+}
+
+function showLoginGate(message) {
+  appShell.classList.add('hidden');
+  loginGate.classList.remove('hidden');
+  loginError.textContent = message || '';
+  loginPinInput.value = '';
+  loginPinInput.focus();
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pin = loginPinInput.value.trim();
+  if (!pin) return;
+  loginSubmitBtn.disabled = true;
+  loginError.textContent = '';
+  try {
+    const { error } = await DB.signInWithPin(pin);
+    if (error) {
+      loginError.textContent = 'தவறான PIN. மீண்டும் முயற்சிக்கவும்.';
+      loginPinInput.value = '';
+      loginPinInput.focus();
+      return;
+    }
+    await showApp();
+  } catch (err) {
+    loginError.textContent = 'இணைய பிழை — மீண்டும் முயற்சிக்கவும்.';
+    console.error(err);
+  } finally {
+    loginSubmitBtn.disabled = false;
+  }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  if (!confirm('வெளியேற வேண்டுமா?')) return;
+  await DB.signOut();
+  showLoginGate();
+});
+
+(async function boot() {
+  try {
+    const session = await DB.getSession();
+    if (session) {
+      await showApp();
+    } else {
+      showLoginGate();
+    }
+  } catch (err) {
+    console.error(err);
+    showLoginGate('இணைய பிழை — மீண்டும் முயற்சிக்கவும்.');
+  }
 })();

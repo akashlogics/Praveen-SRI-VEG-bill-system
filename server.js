@@ -1,39 +1,25 @@
-const express=require('express'),path=require('path'),db=require('./db');
-const app=express(),PORT=process.env.PORT||4500;
-app.use(express.json({limit:'5mb'}));
-app.use(express.static(path.join(__dirname,'public')));
-function h(res,fn){try{res.json(fn());}catch(e){res.status(400).json({error:e.message||String(e)});}}
-app.get('/api/shop',(q,r)=>h(r,()=>db.getShop()));
-app.put('/api/shop',(q,r)=>h(r,()=>db.updateShop(q.body)));
-app.get('/api/items',(q,r)=>h(r,()=>db.getItems()));
-app.post('/api/items',(q,r)=>h(r,()=>db.addItem(q.body)));
-app.put('/api/items/:id',(q,r)=>h(r,()=>db.updateItem(q.params.id,q.body)));
-app.delete('/api/items/:id',(q,r)=>h(r,()=>({deleted:db.deleteItem(q.params.id)})));
-app.get('/api/customers',(q,r)=>h(r,()=>db.getCustomers()));
-app.post('/api/customers',(q,r)=>h(r,()=>db.addCustomer(q.body)));
-app.put('/api/customers/:id',(q,r)=>h(r,()=>db.updateCustomer(q.params.id,q.body)));
-app.delete('/api/customers/:id',(q,r)=>h(r,()=>({deleted:db.deleteCustomer(q.params.id)})));
-app.get('/api/customers/:id/ledger',(q,r)=>h(r,()=>{const l=db.getCustomerLedger(q.params.id);if(!l)throw new Error('இல்லை');return l;}));
-app.get('/api/bills',(q,r)=>h(r,()=>db.getBills(q.query)));
-app.get('/api/bills/:id',(q,r)=>h(r,()=>{const b=db.getBill(q.params.id);if(!b)throw new Error('இல்லை');return b;}));
-app.post('/api/bills',(q,r)=>h(r,()=>db.createBill(q.body)));
-app.get('/api/payments',(q,r)=>h(r,()=>db.getPayments(q.query)));
-app.post('/api/payments',(q,r)=>h(r,()=>db.createPayment(q.body)));
-app.get('/api/trucks',(q,r)=>h(r,()=>db.getTrucks()));
-app.post('/api/trucks',(q,r)=>h(r,()=>db.addTruck(q.body)));
-app.put('/api/trucks/:id',(q,r)=>h(r,()=>db.updateTruck(q.params.id,q.body)));
-app.delete('/api/trucks/:id',(q,r)=>h(r,()=>({deleted:db.deleteTruck(q.params.id)})));
-app.get('/api/stock-trips',(q,r)=>h(r,()=>db.getStockTrips(q.query)));
-app.post('/api/stock-trips',(q,r)=>h(r,()=>db.createStockTrip(q.body)));
-app.get('/api/salaries',(q,r)=>h(r,()=>db.getSalaryPayments(q.query)));
-app.post('/api/salaries',(q,r)=>h(r,()=>db.createSalaryPayment(q.body)));
-app.get('/api/dashboard',(q,r)=>h(r,()=>db.getDashboard()));
-app.get('/api/export',(q,r)=>h(r,()=>db.exportAll()));
-app.post('/api/import',(q,r)=>h(r,()=>db.importAll(q.body)));
-app.listen(PORT,()=>{
-  console.log('================================================');
-  console.log('  காய்கறி பில்லிங் சர்வர் இயங்குகிறது!');
-  console.log(`  Browser-ல் திறக்கவும்: http://localhost:${PORT}`);
-  console.log('  இந்த சாளரத்தை மூடவேண்டாம்!');
-  console.log('================================================');
+/* ============================================================
+   SRI K.M. VEGETABLES — static file server for Render
+   All actual data lives in Supabase; this server just serves the
+   front-end (public/) so the app has a URL. No API routes needed —
+   the browser talks to Supabase directly using the anon key in
+   public/config.js, protected by Row Level Security (see
+   supabase/schema.sql).
+   ============================================================ */
+const express = require('express');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Any unknown path falls back to index.html (keeps things working
+// even if a link gets bookmarked with a trailing path).
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log(`SRI K.M. VEGETABLES billing app running on port ${PORT}`);
 });
