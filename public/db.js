@@ -179,9 +179,12 @@ const DB = {
     }
   },
 
-  /* ---------- BILLS (append-only from the UI; cleanup deletes ranges) ---------- */
+  /* ---------- BILLS ---------- */
   async insertBill(bill) {
     throwIfError(await supabaseClient.from('bills').insert(billToRow(bill)));
+  },
+  async deleteBill(id) {
+    throwIfError(await supabaseClient.from('bills').delete().eq('id', id));
   },
   async deleteBillsBefore(dateISO) {
     throwIfError(await supabaseClient.from('bills').delete().lt('date_iso', dateISO));

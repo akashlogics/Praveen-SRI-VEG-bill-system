@@ -163,14 +163,52 @@ function renderDashboard() {
       <td>${escapeHtml(b.customerName)}</td>
       <td>${money(b.total)}</td>
       <td>${money(b.grandTotal)}</td>
-      <td><button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button></td>
+      <td>
+        <button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button>
+        <button class="btn btn-ghost btn-danger-text bill-del-btn" data-id="${b.id}" title="பில் நீக்கு">🗑</button>
+      </td>
     `;
     tbody.appendChild(tr);
   });
   tbody.querySelectorAll('.view-bill-btn').forEach(btn => {
     btn.addEventListener('click', () => openPrintModal(bills.find(b => b.id === btn.dataset.id)));
   });
+  tbody.querySelectorAll('.bill-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteBillById(btn.dataset.id, btn));
+  });
 }
+/* ---------------- Delete a bill (made by mistake) ----------------
+   Bills are shown in the Dashboard's recent list and the Reports
+   tab; both share this one function. Deleting just removes the row
+   — since every balance is derived (opening + bills − payments),
+   the customer's balance corrects itself automatically, no other
+   bookkeeping needed. Bill numbers are not reused/renumbered after
+   a delete (normal accounting practice — a gap is fine, a duplicate
+   number is not). */
+async function deleteBillById(id, btn) {
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+  const ok = confirm(
+    `பில் எண் ${b.billNo} (${b.customerName}, ₹${plainMoney(b.total)}) ஐ நீக்கவா?\n` +
+    `இது நிரந்தரமாக நீக்கப்படும், "${b.customerName}"-ன் பாக்கி தொகையும் அதற்கேற்ப மாறும்.`
+  );
+  if (!ok) return;
+  if (btn) btn.disabled = true;
+  try {
+    await DB.deleteBill(id);
+    bills = bills.filter(x => x.id !== id);
+    renderDashboard();
+    if (document.getElementById('tab-reports').classList.contains('active')) runReport();
+    if (document.getElementById('tab-ledger').classList.contains('active')) renderLedgerTab();
+    if (document.getElementById('tab-customers').classList.contains('active')) renderCustomersTab();
+  } catch (err) {
+    alert('பில்லை நீக்க முடியவில்லை — இணையம் இணைப்பை சரிபார்த்து மீண்டும் முயற்சிக்கவும்.');
+    console.error(err);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str ?? '';
@@ -932,12 +970,18 @@ function runReport() {
       <td>${escapeHtml(b.customerName)}</td>
       <td>${money(b.total)}</td>
       <td>${money(b.grandTotal)}</td>
-      <td><button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button></td>
+      <td>
+        <button class="btn btn-ghost view-bill-btn" data-id="${b.id}">காண்க</button>
+        <button class="btn btn-ghost btn-danger-text bill-del-btn" data-id="${b.id}" title="பில் நீக்கு">🗑</button>
+      </td>
     `;
     tbody.appendChild(tr);
   });
   tbody.querySelectorAll('.view-bill-btn').forEach(btn => {
     btn.addEventListener('click', () => openPrintModal(bills.find(b => b.id === btn.dataset.id)));
+  });
+  tbody.querySelectorAll('.bill-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteBillById(btn.dataset.id, btn));
   });
 
   document.getElementById('reportStats').style.display = 'grid';
@@ -1072,6 +1116,18 @@ function openPrintModal(bill) {
 document.getElementById('closePrintBtn').addEventListener('click', () => {
   printModal.classList.add('hidden');
   currentPrintBill = null;
+});
+
+document.getElementById('deleteBillFromModalBtn').addEventListener('click', async () => {
+  if (!currentPrintBill) return;
+  const id = currentPrintBill.id;
+  const btn = document.getElementById('deleteBillFromModalBtn');
+  await deleteBillById(id, btn);
+  // If it actually got deleted (bill no longer in the array), close the modal.
+  if (!bills.find(b => b.id === id)) {
+    printModal.classList.add('hidden');
+    currentPrintBill = null;
+  }
 });
 
 function buildReceiptHTML(b) {
