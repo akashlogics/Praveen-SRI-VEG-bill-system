@@ -16,7 +16,7 @@
    ============================================================ */
 
 const SUPABASE_CONFIG = {
-  url: 'https://YOUR-PROJECT-REF.supabase.co',
-  anonKey: 'YOUR-SUPABASE-ANON-PUBLIC-KEY',
-  loginEmail: 'shop@sri-km-vegetables.local'
+  url: 'https://llhjsrfipnndjmbxywuu.supabase.co',
+  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxsaGpzcmZpcG5uZGptYnh5d3V1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcwNTI5MjcsImV4cCI6MjEwMjYyODkyN30.ARFURBO0XtACTSziPOmjULR4ajd56BWLGbU5nQ4h0OY',
+  loginEmail: 'mk7740361@gmail.com'
 };
