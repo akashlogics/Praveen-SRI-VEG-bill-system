@@ -81,6 +81,9 @@ function plainMoney(n) {
   n = Number(n) || 0;
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
 function todayISO() {
   const d = new Date();
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
@@ -411,10 +414,10 @@ document.getElementById('newCustomerQuickBtn').addEventListener('click', () => {
   document.getElementById('qcName').value = '';
   document.getElementById('qcPhone').value = '';
   document.getElementById('qcBalance').value = 0;
-  custModal.classList.remove('hidden');
+  openModal(custModal);
   document.getElementById('qcName').focus();
 });
-document.getElementById('qcCancel').addEventListener('click', () => custModal.classList.add('hidden'));
+document.getElementById('qcCancel').addEventListener('click', () => closeModal(custModal));
 document.getElementById('qcSave').addEventListener('click', async () => {
   const name = document.getElementById('qcName').value.trim();
   if (!name) { alert('பெயரை குறிப்பிடவும்.'); return; }
@@ -426,7 +429,7 @@ document.getElementById('qcSave').addEventListener('click', async () => {
   try {
     await DB.upsertCustomer(cust);
     customers.push(cust);
-    custModal.classList.add('hidden');
+    closeModal(custModal);
     populateCustomerSelect();
     document.getElementById('billCustomerSelect').value = cust.id;
     updatePrevBalanceDisplay();
@@ -594,9 +597,10 @@ function openPaymentModal(custId) {
   document.getElementById('payAmount').value = '';
   document.getElementById('payNote').value = '';
   payModal.classList.remove('hidden');
+  history.pushState({ skvModalOpen: true }, '');
   document.getElementById('payAmount').focus();
 }
-document.getElementById('payCancel').addEventListener('click', () => payModal.classList.add('hidden'));
+document.getElementById('payCancel').addEventListener('click', () => closeModal(payModal));
 document.getElementById('paySave').addEventListener('click', async () => {
   const amount = parseFloat(document.getElementById('payAmount').value) || 0;
   const dateISO = document.getElementById('payDate').value || todayISO();
@@ -616,7 +620,7 @@ document.getElementById('paySave').addEventListener('click', async () => {
   try {
     await DB.insertPayment(payment);
     payments.push(payment);
-    payModal.classList.add('hidden');
+    closeModal(payModal);
     renderCustomersTab();
     renderDashboard();
     if (document.getElementById('tab-ledger').classList.contains('active')) renderLedgerTab();
@@ -695,21 +699,46 @@ function renderLedgerTab() {
   });
 }
 
+/* ---------------- Excel (.xlsx) export helper ----------------
+   Using a real .xlsx (via SheetJS) instead of CSV avoids the classic
+   problem of Tamil text turning into garbled characters when a CSV
+   is opened directly in Excel — and it keeps totals as real numbers
+   so he can select a column and see Excel's own sum in the status
+   bar to double-check against what the app shows. */
+function downloadXlsx(filename, sheetName, aoa) {
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 14 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  XLSX.writeFile(wb, filename);
+}
+
 document.getElementById('downloadLedgerBtn').addEventListener('click', () => {
   const dateISO = document.getElementById('ledgerDate').value || todayISO();
-  let csv = 'பெயர்,முதல் பாக்கி,பொருள் எடுக்கது,மொத்தம்,ரூ. கொடுத்தது,பாக்கி\n';
-  [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(c => {
+  const rows = [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).map(c => {
     const opening = customerOpeningForDate(c, dateISO);
     const goodsToday = customerBillsOn(c.id, dateISO).reduce((s, b) => s + b.total, 0);
     const paidToday = customerPaymentsOn(c.id, dateISO).reduce((s, p) => s + p.amount, 0);
     const total = opening + goodsToday;
     const closing = total - paidToday;
-    csv += [
-      `"${c.name.replace(/"/g, '""')}"`,
-      plainMoney(opening), plainMoney(goodsToday), plainMoney(total), plainMoney(paidToday), plainMoney(closing)
-    ].join(',') + '\n';
+    return [c.name, round2(opening), round2(goodsToday), round2(total), round2(paidToday), round2(closing)];
   });
-  downloadBlob(csv, `daily-ledger_${dateISO}.csv`, 'text/csv;charset=utf-8;');
+  // Every customer appears whether they bought anything or paid anything
+  // that day or not — zero rows are kept, not filtered out, so this can
+  // be used as a full daily attendance/verification sheet.
+  const sums = rows.reduce((acc, r) => {
+    acc[0] += r[1]; acc[1] += r[2]; acc[2] += r[3]; acc[3] += r[4]; acc[4] += r[5];
+    return acc;
+  }, [0, 0, 0, 0, 0]);
+
+  const aoa = [
+    [`SRI K.M. VEGETABLES — நாள் கணக்கு — ${formatDateDisplay(dateISO)}`],
+    [],
+    ['பெயர்', 'முதல் பாக்கி', 'பொருள் எடுக்கது', 'மொத்தம்', 'ரூ. கொடுத்தது', 'பாக்கி'],
+    ...rows,
+    ['மொத்தம்', ...sums.map(round2)]
+  ];
+  downloadXlsx(`daily-ledger_${dateISO}.xlsx`, 'Daily Ledger', aoa);
 });
 
 /* ============================================================
@@ -1104,6 +1133,34 @@ document.getElementById('importDataInput').addEventListener('change', (e) => {
 /* ============================================================
    PRINT / RECEIPT MODAL
    ============================================================ */
+/* ---------------- Modal / back-button handling ----------------
+   Without this, opening a modal (bill preview, payment, add customer)
+   doesn't add anything to browser history — so pressing the phone's
+   back button, or swiping back, skips straight past the app entirely
+   (looks like "logging out"), instead of just closing the modal.
+   Fix: push a dummy history entry whenever a modal opens, and treat
+   back/swipe as "close the modal" via the popstate event. */
+function openModal(modalEl) {
+  modalEl.classList.remove('hidden');
+  history.pushState({ skvModalOpen: true }, '');
+}
+function closeModal(modalEl) {
+  modalEl.classList.add('hidden');
+  if (history.state && history.state.skvModalOpen) {
+    history.back();
+  }
+}
+window.addEventListener('popstate', () => {
+  [
+    document.getElementById('printModal'),
+    document.getElementById('payModal'),
+    document.getElementById('custModal')
+  ].forEach(m => {
+    if (m && !m.classList.contains('hidden')) m.classList.add('hidden');
+  });
+  currentPrintBill = null;
+});
+
 const printModal = document.getElementById('printModal');
 let currentPrintBill = null;
 
@@ -1111,10 +1168,14 @@ function openPrintModal(bill) {
   if (!bill) return;
   currentPrintBill = bill;
   document.getElementById('billPrintArea').innerHTML = buildReceiptHTML(bill);
-  printModal.classList.remove('hidden');
+  openModal(printModal);
 }
 document.getElementById('closePrintBtn').addEventListener('click', () => {
-  printModal.classList.add('hidden');
+  closeModal(printModal);
+  currentPrintBill = null;
+});
+document.getElementById('closePrintBtn2').addEventListener('click', () => {
+  closeModal(printModal);
   currentPrintBill = null;
 });
 
@@ -1125,7 +1186,7 @@ document.getElementById('deleteBillFromModalBtn').addEventListener('click', asyn
   await deleteBillById(id, btn);
   // If it actually got deleted (bill no longer in the array), close the modal.
   if (!bills.find(b => b.id === id)) {
-    printModal.classList.add('hidden');
+    closeModal(printModal);
     currentPrintBill = null;
   }
 });
