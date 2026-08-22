@@ -81,10 +81,15 @@ create table if not exists bills (
   items_json jsonb not null default '[]',
   total numeric not null default 0,
   prev_balance numeric not null default 0,
-  grand_total numeric not null default 0
+  grand_total numeric not null default 0,
+  paid_on_bill_date numeric not null default 0
 );
 create index if not exists bills_customer_idx on bills(customer_id);
 create index if not exists bills_date_idx on bills(date_iso);
+
+-- Migration for an already-deployed database (safe to run even if the
+-- column already exists — this whole schema.sql can always be re-run).
+alter table bills add column if not exists paid_on_bill_date numeric not null default 0;
 
 -- ---------- payments ("ரூ. கொடுத்தது") ----------
 create table if not exists payments (

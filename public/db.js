@@ -63,7 +63,8 @@ function rowToBill(row) {
     items: row.items_json || [],
     total: Number(row.total),
     prevBalance: Number(row.prev_balance),
-    grandTotal: Number(row.grand_total)
+    grandTotal: Number(row.grand_total),
+    paidToday: Number(row.paid_on_bill_date) || 0
   };
 }
 function billToRow(b) {
@@ -79,7 +80,8 @@ function billToRow(b) {
     items_json: b.items,
     total: b.total,
     prev_balance: b.prevBalance,
-    grand_total: b.grandTotal
+    grand_total: b.grandTotal,
+    paid_on_bill_date: b.paidToday || 0
   };
 }
 function rowToPayment(row) {
@@ -193,6 +195,9 @@ const DB = {
   /* ---------- PAYMENTS ---------- */
   async insertPayment(payment) {
     throwIfError(await supabaseClient.from('payments').insert(paymentToRow(payment)));
+  },
+  async deletePayment(id) {
+    throwIfError(await supabaseClient.from('payments').delete().eq('id', id));
   },
   async deletePaymentsBefore(dateISO) {
     throwIfError(await supabaseClient.from('payments').delete().lt('date_iso', dateISO));

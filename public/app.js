@@ -367,11 +367,18 @@ async function saveBill() {
   const prevBalance = customerCurrentBalance(cust);
   const grandTotal = total + prevBalance;
   const now = new Date();
+  const dateISO = todayISO();
+  // Any payment already recorded for this customer earlier today (e.g. cash
+  // handed over along with picking up the goods) — captured as a snapshot
+  // on the bill itself, the way a printed paper receipt would show it at
+  // that moment. Payments recorded later the same day won't retroactively
+  // change a bill that's already been printed/shared.
+  const paidToday = customerPaymentsOn(cust.id, dateISO).reduce((s, p) => s + p.amount, 0);
 
   const bill = {
     id: uid('bill_'),
     billNo: shop.nextBillNo,
-    dateISO: todayISO(),
+    dateISO,
     timeDisplay: formatTimeDisplay(now),
     createdAt: now.getTime(),
     customerId: cust.id,
@@ -380,7 +387,8 @@ async function saveBill() {
     items: rows,
     total,
     prevBalance,
-    grandTotal
+    grandTotal,
+    paidToday
   };
 
   const saveBtn = document.getElementById('saveBillBtn');
@@ -447,8 +455,16 @@ document.getElementById('qcSave').addEventListener('click', async () => {
 function renderItemsTab() {
   const tbody = document.querySelector('#itemsTable tbody');
   tbody.innerHTML = '';
-  document.getElementById('itemsCountLabel').textContent = `${items.length} பொருட்கள்`;
-  [...items].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(it => {
+  const term = (document.getElementById('itemSearchInput').value || '').trim().toLowerCase();
+  const filtered = term ? items.filter(it => it.name.toLowerCase().includes(term)) : items;
+
+  document.getElementById('itemsCountLabel').textContent = term
+    ? `${filtered.length} / ${items.length} பொருட்கள்`
+    : `${items.length} பொருட்கள்`;
+  document.getElementById('itemSearchEmpty').style.display = (term && filtered.length === 0) ? 'block' : 'none';
+  document.getElementById('itemSearchEmptyTerm').textContent = document.getElementById('itemSearchInput').value.trim();
+
+  [...filtered].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(it => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${escapeHtml(it.name)}</td>
@@ -492,6 +508,7 @@ function renderItemsTab() {
     });
   });
 }
+document.getElementById('itemSearchInput').addEventListener('input', renderItemsTab);
 
 document.getElementById('addItemBtn').addEventListener('click', async () => {
   const name = document.getElementById('newItemName').value.trim();
@@ -516,8 +533,18 @@ document.getElementById('addItemBtn').addEventListener('click', async () => {
 function renderCustomersTab() {
   const tbody = document.querySelector('#customersTable tbody');
   tbody.innerHTML = '';
-  document.getElementById('custCountLabel').textContent = `${customers.length} வாடிக்கையாளர்`;
-  [...customers].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(c => {
+  const term = (document.getElementById('custSearchInput').value || '').trim().toLowerCase();
+  const filtered = term
+    ? customers.filter(c => c.name.toLowerCase().includes(term) || (c.phone || '').includes(term))
+    : customers;
+
+  document.getElementById('custCountLabel').textContent = term
+    ? `${filtered.length} / ${customers.length} வாடிக்கையாளர்`
+    : `${customers.length} வாடிக்கையாளர்`;
+  document.getElementById('custSearchEmpty').style.display = (term && filtered.length === 0) ? 'block' : 'none';
+  document.getElementById('custSearchEmptyTerm').textContent = document.getElementById('custSearchInput').value.trim();
+
+  [...filtered].sort((a, b) => a.name.localeCompare(b.name, 'ta')).forEach(c => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${escapeHtml(c.name)}</td>
@@ -562,6 +589,7 @@ function renderCustomersTab() {
     });
   });
 }
+document.getElementById('custSearchInput').addEventListener('input', renderCustomersTab);
 
 document.getElementById('addCustBtn').addEventListener('click', async () => {
   const name = document.getElementById('newCustName').value.trim();
@@ -697,6 +725,72 @@ function renderLedgerTab() {
       updatePrevBalanceDisplay();
     });
   });
+
+  renderPaidTodayList(dateISO);
+}
+
+/* ---------------- Paid Today list ----------------
+   A flat list of every individual payment recorded on the selected
+   date (not aggregated per customer, since he wants to be able to
+   spot and delete one wrong entry without affecting the others). */
+function renderPaidTodayList(dateISO) {
+  document.getElementById('paidTodayDateLabel').textContent = formatDateDisplay(dateISO);
+  const todaysPayments = payments
+    .filter(p => p.dateISO === dateISO)
+    .sort((a, b) => a.createdAt - b.createdAt);
+
+  document.getElementById('paidTodayCountLabel').textContent = `${todaysPayments.length} பேர்`;
+  document.getElementById('paidTodayEmpty').style.display = todaysPayments.length ? 'none' : 'block';
+
+  const tbody = document.querySelector('#paidTodayTable tbody');
+  tbody.innerHTML = '';
+  let sum = 0;
+  todaysPayments.forEach(p => {
+    sum += p.amount;
+    const c = findCustomer(p.customerId);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(c ? c.name : 'வாடிக்கையாளர் நீக்கப்பட்டது')}</td>
+      <td class="num strong">${plainMoney(p.amount)}</td>
+      <td>${escapeHtml(p.note || '—')}</td>
+      <td>${formatTimeDisplay(new Date(p.createdAt))}</td>
+      <td><button class="btn-danger-text pay-del-btn" data-id="${p.id}">🗑 நீக்கு</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('paidTodaySum').textContent = plainMoney(sum);
+
+  tbody.querySelectorAll('.pay-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => deletePaymentById(btn.dataset.id, btn));
+  });
+}
+
+/* ---------------- Delete a payment (recorded by mistake) ----------------
+   Same reasoning as deleteBillById: balances are always derived, so
+   removing a payment row is enough — every customer's balance
+   corrects itself with no other bookkeeping. */
+async function deletePaymentById(id, btn) {
+  const p = payments.find(x => x.id === id);
+  if (!p) return;
+  const c = findCustomer(p.customerId);
+  const ok = confirm(
+    `${c ? c.name : 'இந்த'} -இடமிருந்து பெற்ற ₹${plainMoney(p.amount)} பணம் பெற்ற பதிவை நீக்கவா?\n` +
+    `இது நிரந்தரமாக நீக்கப்படும், பாக்கி தொகையும் அதற்கேற்ப மாறும்.`
+  );
+  if (!ok) return;
+  if (btn) btn.disabled = true;
+  try {
+    await DB.deletePayment(id);
+    payments = payments.filter(x => x.id !== id);
+    if (document.getElementById('tab-ledger').classList.contains('active')) renderLedgerTab();
+    renderDashboard();
+    if (document.getElementById('tab-customers').classList.contains('active')) renderCustomersTab();
+  } catch (err) {
+    alert('நீக்க முடியவில்லை — இணையம் இணைப்பை சரிபார்த்து மீண்டும் முயற்சிக்கவும்.');
+    console.error(err);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ---------------- Excel (.xlsx) export helper ----------------
@@ -821,15 +915,20 @@ function monthNameTa(m) {
 
 document.getElementById('downloadMonthlyBtn').addEventListener('click', () => {
   const monthStr = document.getElementById('monthlyMonth').value || currentMonthStr();
+  const [y, m] = monthStr.split('-');
   const rows = computeMonthlyRows(monthStr);
-  let csv = 'பெயர்,மாத தொடக்க பாக்கி,இம்மாத விற்பனை,இம்மாத வரவு,மாத இறுதி பாக்கி\n';
-  rows.forEach(r => {
-    csv += [
-      `"${r.customer.name.replace(/"/g, '""')}"`,
-      plainMoney(r.opening), plainMoney(r.goods), plainMoney(r.paid), plainMoney(r.closing)
-    ].join(',') + '\n';
-  });
-  downloadBlob(csv, `monthly-summary_${monthStr}.csv`, 'text/csv;charset=utf-8;');
+  const sums = rows.reduce((acc, r) => {
+    acc[0] += r.opening; acc[1] += r.goods; acc[2] += r.paid; acc[3] += r.closing;
+    return acc;
+  }, [0, 0, 0, 0]);
+  const aoa = [
+    [`SRI K.M. VEGETABLES — மாத சுருக்கம் — ${monthNameTa(Number(m))} ${y}`],
+    [],
+    ['பெயர்', 'மாத தொடக்க பாக்கி', 'இம்மாத விற்பனை', 'இம்மாத வரவு', 'மாத இறுதி பாக்கி'],
+    ...rows.map(r => [r.customer.name, round2(r.opening), round2(r.goods), round2(r.paid), round2(r.closing)]),
+    ['மொத்தம்', ...sums.map(round2)]
+  ];
+  downloadXlsx(`monthly-summary_${monthStr}.xlsx`, 'Monthly Summary', aoa);
 });
 
 document.getElementById('printMonthlyBtn').addEventListener('click', () => {
@@ -1025,23 +1124,33 @@ document.getElementById('downloadReportBtn').addEventListener('click', () => {
     runReport();
     if (lastReportRows.length === 0) return;
   }
-  let csv = 'பில் எண்,தேதி,நேரம்,வாடிக்கையாளர்,பொருட்கள்,இன்றைய தொகை,முன் பாக்கி,மொத்தம்\n';
-  lastReportRows.forEach(b => {
+  const from = document.getElementById('reportFrom').value;
+  const to = document.getElementById('reportTo').value;
+  const rows = lastReportRows.map(b => {
     const itemsStr = b.items.map(it => `${it.name} (${it.qty} ${it.unit} x ${it.price})`).join(' | ');
-    csv += [
+    return [
       b.billNo,
       formatDateDisplay(b.dateISO),
       b.timeDisplay,
-      `"${b.customerName.replace(/"/g, '""')}"`,
-      `"${itemsStr.replace(/"/g, '""')}"`,
-      plainMoney(b.total),
-      plainMoney(b.prevBalance),
-      plainMoney(b.grandTotal)
-    ].join(',') + '\n';
+      b.customerName,
+      itemsStr,
+      round2(b.total),
+      round2(b.prevBalance),
+      round2(b.grandTotal)
+    ];
   });
-  const from = document.getElementById('reportFrom').value;
-  const to = document.getElementById('reportTo').value;
-  downloadBlob(csv, `sales-report_${from}_to_${to}.csv`, 'text/csv;charset=utf-8;');
+  const sums = rows.reduce((acc, r) => {
+    acc[0] += r[5]; acc[1] += r[6]; acc[2] += r[7];
+    return acc;
+  }, [0, 0, 0]);
+  const aoa = [
+    [`SRI K.M. VEGETABLES — விற்பனை அறிக்கை — ${formatDateDisplay(from)} முதல் ${formatDateDisplay(to)} வரை`],
+    [],
+    ['பில் எண்', 'தேதி', 'நேரம்', 'வாடிக்கையாளர்', 'பொருட்கள்', 'இன்றைய தொகை', 'முன் பாக்கி', 'மொத்தம்'],
+    ...rows,
+    ['', '', '', '', 'மொத்தம்', ...sums.map(round2)]
+  ];
+  downloadXlsx(`sales-report_${from}_to_${to}.xlsx`, 'Sales Report', aoa);
 });
 
 function downloadBlob(content, filename, mime) {
@@ -1222,14 +1331,16 @@ function buildReceiptHTML(b) {
     </table>
     <div class="receipt-line"></div>
     <div class="receipt-totals">
-      <div class="totals-row grand">
-        <span>மொத்த தொகை</span><strong>${plainMoney(b.total)}</strong>
+      <div class="totals-row today-amt">
+        <span>இன்றைய தொகை</span><strong>${plainMoney(b.total)}</strong>
       </div>
+      <div class="totals-row"><span>முன் பாக்கி</span><strong>${plainMoney(b.prevBalance)}</strong></div>
     </div>
     <div class="receipt-line"></div>
     <div class="receipt-totals">
-      <div class="totals-row"><span>முன் பாக்கி</span><strong>${plainMoney(b.prevBalance)}</strong></div>
       <div class="totals-row grand"><span>மொத்தம்</span><strong>${plainMoney(b.grandTotal)}</strong></div>
+      <div class="totals-row received-amt"><span>வரவு</span><strong>${plainMoney(b.paidToday || 0)}</strong></div>
+      <div class="totals-row balance-due"><span>பாக்கித் தொகை</span><strong>${plainMoney(b.grandTotal - (b.paidToday || 0))}</strong></div>
     </div>
     <div class="receipt-foot">நன்றி! மீண்டும் வரவும்.</div>
   `;

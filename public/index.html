@@ -257,6 +257,37 @@
           </div>
         </div>
       </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>💰 <span id="paidTodayDateLabel"></span> — பணம் பெற்றவர்கள்</h2>
+          <span class="muted" id="paidTodayCountLabel"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="paidTodayTable">
+            <thead>
+              <tr>
+                <th>பெயர்</th>
+                <th class="num">தொகை</th>
+                <th>குறிப்பு</th>
+                <th>நேரம்</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+            <tfoot>
+              <tr class="ledger-total-row">
+                <td colspan="1">மொத்தம்</td>
+                <td class="num" id="paidTodaySum">0.00</td>
+                <td colspan="3"></td>
+              </tr>
+            </tfoot>
+          </table>
+          <div class="empty-state" id="paidTodayEmpty" style="display:none;">
+            இந்த தேதிக்கு இன்னும் யாரும் பணம் செலுத்தவில்லை.
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ITEMS -->
@@ -300,11 +331,17 @@
           <h2>பொருட்கள் பட்டியல்</h2>
           <span class="muted" id="itemsCountLabel"></span>
         </div>
+        <div class="form-field" style="margin-bottom:14px;">
+          <input type="search" id="itemSearchInput" placeholder="🔍 பொருள் பெயரை தேடவும்...">
+        </div>
         <div class="table-wrap">
           <table class="data-table" id="itemsTable">
             <thead><tr><th>பொருள்</th><th>அலகு</th><th>விலை (₹)</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
+          <div class="empty-state" id="itemSearchEmpty" style="display:none;">
+            "<span id="itemSearchEmptyTerm"></span>" என தேடலில் எதுவும் கிடைக்கவில்லை.
+          </div>
         </div>
       </div>
     </section>
@@ -345,11 +382,17 @@
           <h2>வாடிக்கையாளர் பட்டியல்</h2>
           <span class="muted" id="custCountLabel"></span>
         </div>
+        <div class="form-field" style="margin-bottom:14px;">
+          <input type="search" id="custSearchInput" placeholder="🔍 பெயர் அல்லது எண்ணை தேடவும்...">
+        </div>
         <div class="table-wrap">
           <table class="data-table" id="customersTable">
             <thead><tr><th>பெயர்</th><th>WhatsApp எண்</th><th>ஆரம்ப பாக்கி (₹)</th><th>தற்போதைய பாக்கி</th><th></th><th></th></tr></thead>
             <tbody></tbody>
           </table>
+          <div class="empty-state" id="custSearchEmpty" style="display:none;">
+            "<span id="custSearchEmptyTerm"></span>" என தேடலில் எதுவும் கிடைக்கவில்லை.
+          </div>
         </div>
       </div>
     </section>
@@ -377,7 +420,7 @@
           </div>
           <div class="form-field">
             <label>&nbsp;</label>
-            <button class="btn btn-secondary" id="downloadReportBtn">⬇ CSV பதிவிறக்கம்</button>
+            <button class="btn btn-secondary" id="downloadReportBtn">⬇ Excel பதிவிறக்கம் (.xlsx)</button>
           </div>
         </div>
       </div>
@@ -430,7 +473,7 @@
           </div>
           <div class="form-field">
             <label>&nbsp;</label>
-            <button class="btn btn-secondary" id="downloadMonthlyBtn">⬇ CSV பதிவிறக்கம்</button>
+            <button class="btn btn-secondary" id="downloadMonthlyBtn">⬇ Excel பதிவிறக்கம் (.xlsx)</button>
           </div>
           <div class="form-field">
             <label>&nbsp;</label>

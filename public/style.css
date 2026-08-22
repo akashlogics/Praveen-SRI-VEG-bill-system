@@ -510,6 +510,11 @@ input[type="number"]{ font-family: var(--font-num); }
 .receipt-table .num{ text-align:right; font-family: var(--font-num); }
 .receipt-totals .totals-row{ padding:3px 0; font-size:13px; }
 .receipt-totals .grand{ font-weight:800; font-size:15px; border-top:1px solid #999; padding-top:6px; margin-top:4px; }
+.receipt-totals .today-amt{ color: var(--danger); font-weight:700; font-size:15px; }
+.receipt-totals .received-amt{ color: var(--danger); font-weight:700; }
+.receipt-totals .balance-due{
+  font-weight:800; font-size:18px; border-top:2px solid #333; padding-top:7px; margin-top:5px;
+}
 .receipt-foot{ text-align:center; font-size:11.5px; color:#666; margin-top:10px; }
 
 .modal-actions.no-print{ justify-content:center; }
